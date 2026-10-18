@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ledgerchain"
+version = "0.1.0"
+description = "Hash-chained, tamper-evident decision ledger on SQLAlchemy: append-only rows, Merkle checkpoints, external anchoring, and a verifier that recomputes everything."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mike Pointer", email = "mpointer@gmail.com" }]
+keywords = ["ledger", "audit-trail", "hash-chain", "merkle", "tamper-evident", "sqlalchemy", "ai-governance"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+  "Topic :: Security",
+  "Topic :: System :: Logging",
+  "Typing :: Typed",
+]
+dependencies = [
+  "sqlalchemy>=2.0",
+  "rfc8785>=0.1.4",
+]
+
+[project.optional-dependencies]
+s3 = ["boto3>=1.34"]
+postgres = ["psycopg[binary]>=3.1"]
+dev = [
+  "pytest>=8",
+  "mypy>=1.10",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+ledgerchain = "ledgerchain.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mpointer/ledgerchain"
+Changelog = "https://github.com/mpointer/ledgerchain/blob/main/CHANGELOG.md"
+Issues = "https://github.com/mpointer/ledgerchain/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ledgerchain"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/ledgerchain", "tests", "README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+files = ["src/ledgerchain"]
