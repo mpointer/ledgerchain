@@ -208,6 +208,19 @@ The suite runs on in-memory and file-backed SQLite and needs no services.
 The PostgreSQL trigger SQL is the same text the origin application runs in
 CI against a real Postgres.
 
+## Releasing
+
+1. Bump `version` in `pyproject.toml` and add a `CHANGELOG.md` entry.
+2. Commit, then tag `vX.Y.Z` and push the tag. The release workflow checks
+   the tag against the version, re-runs the suite, builds, and publishes to
+   PyPI through trusted publishing (no stored token).
+
+## Provenance
+
+Extracted from `mpointer/rmfx-v2` (`packages/ledgerchain`), where the same
+code is consumed by the application that produced it. The history here is
+the `git subtree split` of that directory.
+
 ## License
 
 MIT.
