@@ -20,6 +20,9 @@ pip install ledgerchain          # core: sqlalchemy + rfc8785
 pip install "ledgerchain[s3]"    # adds boto3 for checkpoint anchoring
 ```
 
+The short background on why this exists and what it deliberately does not
+do is in [docs/why-ledgerchain.md](docs/why-ledgerchain.md).
+
 ## What it guarantees
 
 | Threat | Mechanism | Detected by |
