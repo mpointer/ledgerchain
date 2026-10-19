@@ -211,9 +211,11 @@ CI against a real Postgres.
 ## Releasing
 
 1. Bump `version` in `pyproject.toml` and add a `CHANGELOG.md` entry.
-2. Commit, then tag `vX.Y.Z` and push the tag. The release workflow checks
-   the tag against the version, re-runs the suite, builds, and publishes to
-   PyPI through trusted publishing (no stored token).
+2. Commit, then publish a GitHub release whose tag is `vX.Y.Z` (a bare
+   `X.Y.Z` also works) targeting `main`, or push such a tag by hand. The
+   release workflow checks the tag against the version, re-runs the suite,
+   builds, and publishes to PyPI through trusted publishing (no stored
+   token). A release saved as a draft creates no tag and runs nothing.
 
 ## Provenance
 
