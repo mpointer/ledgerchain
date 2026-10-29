@@ -61,21 +61,26 @@ def cmd_verify(args: argparse.Namespace) -> int:
         body = result.to_dict()
         anchors_ok = True
         if args.check_anchors:
+            config = AnchorConfig.from_env()
             anchor_reports = []
+            # Every checkpoint is read back, whatever anchor_status says: the
+            # status is a database column an attacker can flip to skip this.
             for summary in result.checkpoints:
-                if summary["anchor_status"] != "anchored":
-                    continue
                 cp = session.get(LedgerCheckpoint, summary["id"])
                 if cp is None:
                     continue
-                report = verify_anchor(cp)
-                anchors_ok = anchors_ok and report.ok
+                report = verify_anchor(cp, config=config)
+                # An unreadable object for a checkpoint never marked anchored is
+                # the eventual-consistency window, not a failure.
+                unanchored = report.matched is None and cp.anchor_status != "anchored"
+                anchors_ok = anchors_ok and (report.ok or unanchored)
                 anchor_reports.append(
                     {
                         "id": cp.id,
-                        "anchor_uri": cp.anchor_uri,
+                        "anchor_status": cp.anchor_status,
                         "ok": report.ok,
                         "matched": report.matched,
+                        "unanchored": unanchored,
                         "error": report.error,
                     }
                 )

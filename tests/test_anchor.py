@@ -145,13 +145,32 @@ def test_verify_anchor_round_trip(db, s3, config):
     assert report.anchored["merkle_root"] == cp.merkle_root
 
 
-def test_verify_anchor_without_uri_or_object_reports_error(db, s3, config):
+def test_verify_anchor_without_bucket_or_object_reports_error(db, s3, config):
     cp = make_checkpoint_row(db)
-    assert verify_anchor(cp, config=config, client=s3).error == "checkpoint has no anchor_uri"
+    report = verify_anchor(cp, config=AnchorConfig(bucket=None), client=s3)
+    assert report.error == "LEDGER_ANCHOR_BUCKET not configured"
 
-    cp.anchor_uri = "s3://my-bucket/missing.json"
     report = verify_anchor(cp, config=config, client=s3)
     assert report.ok is False and report.matched is None and "NoSuchKey" in report.error
+
+
+def test_anchor_puts_are_write_once(db, s3, config):
+    cp = make_checkpoint_row(db)
+    anchor_checkpoint(db, cp, config=config, client=s3)
+    assert s3.put_calls[-1]["IfNoneMatch"] == "*"
+
+
+def test_reanchoring_an_unchanged_checkpoint_succeeds(db, s3, config):
+    """A put that landed but whose status commit was lost must not wedge the retry."""
+    seed(db, 2)
+    cp = build_checkpoint(db).checkpoint
+    assert anchor_checkpoint(db, cp, config=config, client=s3).ok
+    cp.anchor_status = "failed"
+    db.commit()
+
+    result = anchor_checkpoint(db, cp, config=config, client=s3)
+    assert result.ok and cp.anchor_status == "anchored"
+    assert len(s3.objects) == 1
 
 
 def test_anchored_root_proves_a_later_rewrite_postdated_it(db, s3, config):

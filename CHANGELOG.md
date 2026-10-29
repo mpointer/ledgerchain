@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+
+- `verify_anchor` now locates the anchored object from its `AnchorConfig`
+  (bucket, prefix) and the checkpoint range, and ignores the row's
+  `anchor_uri`. A database superuser could previously repoint `anchor_uri`
+  at a bucket they control and pass the check. Verify with the same bucket
+  and prefix the anchors were written with.
+- Anchors are write-once (`IfNoneMatch="*"`). Previously a forged checkpoint
+  flipped back to `failed` would be re-anchored to the same key, and in a
+  versioned Object Lock bucket the forged copy became the version
+  `get_object` returns. Re-anchoring an unchanged checkpoint still succeeds.
+  The `s3` extra now requires `boto3>=1.35.2`.
+- `ledgerchain verify --check-anchors` reads back every checkpoint, not only
+  those whose `anchor_status` says `anchored`. A checkpoint never marked
+  anchored and with no object yet is reported as `unanchored`, not a failure.
+
+### Fixed
+
+- `LedgerWriter.append` refreshes the locked head row instead of reusing a
+  stale copy from the session's identity map. `build_checkpoint` failed with
+  `IntegrityError` when another writer committed while it ran.
+
 ## [0.1.0] - 2026-10-18
 
 First standalone release, extracted from a production decision-integrity

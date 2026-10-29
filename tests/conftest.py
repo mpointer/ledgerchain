@@ -80,8 +80,20 @@ class FakeBody:
         return self._data
 
 
+class FakeClientError(Exception):
+    """Shaped like botocore's ClientError: the code lives in ``.response``."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
 class FakeS3:
-    """In-memory stand-in for the boto3 S3 client slice ledgerchain uses."""
+    """In-memory stand-in for the boto3 S3 client slice ledgerchain uses.
+
+    Without ``IfNoneMatch`` a put replaces the object, which is what a
+    versioned bucket's ``get_object`` sees: the newest version wins.
+    """
 
     def __init__(self, *, fail: bool = False):
         self.fail = fail
@@ -92,7 +104,10 @@ class FakeS3:
         self.put_calls.append(kwargs)
         if self.fail:
             raise RuntimeError("simulated S3 outage")
-        self.objects[(kwargs["Bucket"], kwargs["Key"])] = kwargs["Body"]
+        key = (kwargs["Bucket"], kwargs["Key"])
+        if kwargs.get("IfNoneMatch") == "*" and key in self.objects:
+            raise FakeClientError("PreconditionFailed")
+        self.objects[key] = kwargs["Body"]
         return {"ETag": '"fake-etag"'}
 
     def get_object(self, **kwargs):

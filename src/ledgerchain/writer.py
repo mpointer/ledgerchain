@@ -93,7 +93,12 @@ class LedgerWriter:
         if ts is not None and ts.tzinfo is None:
             raise ValueError("ts must be timezone-aware")
 
-        head = session.execute(select(LedgerHead).with_for_update()).scalar_one_or_none()
+        # populate_existing: a head already in the identity map (e.g. read
+        # unlocked earlier in this session) would otherwise keep its stale
+        # last_seq even though FOR UPDATE just returned the current row.
+        head = session.execute(
+            select(LedgerHead).with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
         if head is None:
             head = _create_genesis(session, tenant_id=tenant_id)
 

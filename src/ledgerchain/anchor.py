@@ -165,11 +165,26 @@ def anchor_checkpoint(
     if cfg.object_lock_mode:
         put_kwargs["ObjectLockMode"] = cfg.object_lock_mode
         put_kwargs["ObjectLockRetainUntilDate"] = cfg.retain_until
+    # Write-once. In a versioned (Object Lock) bucket a plain put would add a
+    # newer version that get_object returns, letting a re-anchor of a forged
+    # checkpoint shadow the original witness.
+    put_kwargs["IfNoneMatch"] = "*"
 
+    anchor_uri = f"s3://{cfg.bucket}/{key}"
     try:
         store = client if client is not None else default_client(cfg)
-        store.put_object(**put_kwargs)
-        anchor_uri = f"s3://{cfg.bucket}/{key}"
+        try:
+            store.put_object(**put_kwargs)
+        except Exception as exc:
+            if not _precondition_failed(exc):
+                raise
+            # The key already exists: a retry after a lost commit is fine,
+            # anything else is a forged checkpoint or a shared prefix.
+            existing = verify_anchor(checkpoint, config=cfg, client=store)
+            if not existing.ok:
+                raise RuntimeError(
+                    f"{anchor_uri} already holds a different anchor for this range"
+                ) from exc
         checkpoint.anchor_uri = anchor_uri
         checkpoint.anchor_status = "anchored"
         session.commit()
@@ -182,6 +197,12 @@ def anchor_checkpoint(
         except Exception:  # noqa: BLE001
             session.rollback()
         return AnchorResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+
+
+def _precondition_failed(exc: Exception) -> bool:
+    """S3's 412 answer to ``IfNoneMatch='*'``: the key already exists."""
+    response = getattr(exc, "response", None) or {}
+    return bool(response.get("Error", {}).get("Code") == "PreconditionFailed")
 
 
 def retry_failed_anchors(
@@ -221,14 +242,18 @@ def verify_anchor(
     written when the checkpoint was taken and cannot be changed under
     Object Lock, so a mismatch proves the database row was rewritten after
     anchoring. Never raises.
+
+    The object is located from ``config`` (bucket and prefix) and the
+    checkpoint's range, never from ``anchor_uri`` or ``anchor_status``:
+    those live in the database this check exists to distrust. Verify with
+    the same bucket and prefix the anchors were written with.
     """
-    if checkpoint.anchor_uri is None:
-        return AnchorVerifyResult(ok=False, error="checkpoint has no anchor_uri")
     cfg = config if config is not None else AnchorConfig.from_env()
+    if cfg.bucket is None:
+        return AnchorVerifyResult(ok=False, error="LEDGER_ANCHOR_BUCKET not configured")
     try:
-        bucket, key = parse_anchor_uri(checkpoint.anchor_uri)
         store = client if client is not None else default_client(cfg)
-        response = store.get_object(Bucket=bucket, Key=key)
+        response = store.get_object(Bucket=cfg.bucket, Key=anchor_key(cfg, checkpoint))
         raw = response["Body"].read()
         anchored = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 - report, never raise
