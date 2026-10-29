@@ -46,9 +46,13 @@ def test_genesis_only_created_once(db):
     assert len(rows) == 1
 
 
-def test_genesis_event_type_is_reserved(db):
+@pytest.mark.parametrize("event_type", ["genesis", "checkpoint"])
+def test_reserved_event_types_are_rejected(db, event_type):
+    # verify_chain treats every checkpoint entry as the record of a checkpoint
+    # row, so a caller-written one would poison verification.
     with pytest.raises(ValueError, match="reserved"):
-        LedgerWriter.append(db, event_type="genesis", payload={}, actor={}, tenant_id="acme")
+        LedgerWriter.append(db, event_type=event_type, payload={}, actor={}, tenant_id="acme")
+    assert db.query(DecisionLedgerEntry).count() == 0
 
 
 def test_seq_is_global_not_per_tenant(db):
@@ -162,3 +166,19 @@ def test_verify_clean_chain_and_partial_range(db):
 
     partial = verify_chain(db, from_seq=3, to_seq=4)
     assert partial.valid and partial.checked_entries == 2
+
+
+def test_hash_format_is_frozen():
+    # Changing either constant breaks every existing ledger: a new hash
+    # layout needs a version marker, not an edit here.
+    payload_sha256 = sha256_hex({"b": [1, 2.5, "é"], "a": None, "n": 1e21})
+    assert payload_sha256 == "390eb6ae38e31c31c01ea28d3ddd84f97c2a2bdadb1147e9e3f6bc61e4f4e628"
+    entry_hash = compute_entry_hash(
+        prev_hash=GENESIS_PREV_HASH,
+        payload_sha256=payload_sha256,
+        seq=2,
+        event_type="hitl.approval",
+        ts=datetime(2026, 10, 18, 12, 0, 0, 123456, tzinfo=timezone.utc),
+        tenant_id="acme",
+    )
+    assert entry_hash == "a78122020eff42b15708b45245a867c5edc628a6ead54f4e2cde64c4a82828b5"

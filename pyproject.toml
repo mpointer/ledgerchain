@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-s3 = ["boto3>=1.34"]
+s3 = ["boto3>=1.35.2"]  # first release with PutObject IfNoneMatch (write-once anchors)
 postgres = ["psycopg[binary]>=3.1"]
 dev = [
   "pytest>=8",

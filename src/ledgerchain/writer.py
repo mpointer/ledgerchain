@@ -79,8 +79,10 @@ class LedgerWriter:
         on a cold ledger, then inserts the requested entry chained onto the
         current head.
 
-        ``event_type`` is caller-defined, except ``"genesis"`` which is
-        reserved. ``payload`` and ``actor`` must be JSON-serializable per
+        ``event_type`` is caller-defined, except ``"genesis"`` and
+        ``"checkpoint"``, which are reserved: the verifier trusts every
+        ``checkpoint`` entry as the record of a checkpoint row.
+        ``payload`` and ``actor`` must be JSON-serializable per
         RFC 8785; a ``set`` or a non-string key raises
         :class:`ledgerchain.CanonicalizationError` before anything is
         written. ``ts`` defaults to now and must be timezone-aware if given.
@@ -88,18 +90,10 @@ class LedgerWriter:
         Returns the flushed, not committed, entry so callers can read the
         assigned ``seq`` and ``entry_hash`` immediately.
         """
-        if event_type == GENESIS_EVENT_TYPE:
-            raise ValueError("event_type 'genesis' is reserved for the writer")
-        if ts is not None and ts.tzinfo is None:
-            raise ValueError("ts must be timezone-aware")
-
-        head = session.execute(select(LedgerHead).with_for_update()).scalar_one_or_none()
-        if head is None:
-            head = _create_genesis(session, tenant_id=tenant_id)
-
-        entry = _build_entry(
-            seq=head.last_seq + 1,
-            prev_hash=head.last_hash,
+        if event_type in (GENESIS_EVENT_TYPE, CHECKPOINT_EVENT_TYPE):
+            raise ValueError(f"event_type {event_type!r} is reserved for ledgerchain")
+        return _append(
+            session,
             event_type=event_type,
             payload=payload,
             actor=actor,
@@ -107,11 +101,46 @@ class LedgerWriter:
             subject_uri=subject_uri,
             ts=ts,
         )
-        session.add(entry)
-        head.last_seq = entry.seq
-        head.last_hash = entry.entry_hash
-        session.flush()
-        return entry
+
+
+def _append(
+    session: Session,
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+    actor: Mapping[str, Any],
+    tenant_id: str,
+    subject_uri: str | None = None,
+    ts: datetime | None = None,
+) -> DecisionLedgerEntry:
+    """``LedgerWriter.append`` without the reserved-type check, for this package."""
+    if ts is not None and ts.tzinfo is None:
+        raise ValueError("ts must be timezone-aware")
+
+    # populate_existing: a head already in the identity map (e.g. read
+    # unlocked earlier in this session) would otherwise keep its stale
+    # last_seq even though FOR UPDATE just returned the current row.
+    head = session.execute(
+        select(LedgerHead).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if head is None:
+        head = _create_genesis(session, tenant_id=tenant_id)
+
+    entry = _build_entry(
+        seq=head.last_seq + 1,
+        prev_hash=head.last_hash,
+        event_type=event_type,
+        payload=payload,
+        actor=actor,
+        tenant_id=tenant_id,
+        subject_uri=subject_uri,
+        ts=ts,
+    )
+    session.add(entry)
+    head.last_seq = entry.seq
+    head.last_hash = entry.entry_hash
+    session.flush()
+    return entry
 
 
 def _build_entry(

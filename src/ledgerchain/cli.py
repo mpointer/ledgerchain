@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .anchor import AnchorConfig, anchor_checkpoint, retry_failed_anchors, verify_anchor
+from .anchor import AnchorConfig, anchor_checkpoint, retry_failed_anchors, verify_anchors
 from .checkpoint import build_checkpoint
 from .immutability import create_all
 from .models import LedgerCheckpoint
@@ -61,24 +61,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
         body = result.to_dict()
         anchors_ok = True
         if args.check_anchors:
-            anchor_reports = []
-            for summary in result.checkpoints:
-                if summary["anchor_status"] != "anchored":
-                    continue
-                cp = session.get(LedgerCheckpoint, summary["id"])
-                if cp is None:
-                    continue
-                report = verify_anchor(cp)
-                anchors_ok = anchors_ok and report.ok
-                anchor_reports.append(
-                    {
-                        "id": cp.id,
-                        "anchor_uri": cp.anchor_uri,
-                        "ok": report.ok,
-                        "matched": report.matched,
-                        "error": report.error,
-                    }
-                )
+            rows = [session.get(LedgerCheckpoint, s["id"]) for s in result.checkpoints]
+            anchors_ok, anchor_reports = verify_anchors(
+                [cp for cp in rows if cp is not None],
+                from_seq=args.from_seq or 1,
+                to_seq=args.to_seq,
+                config=AnchorConfig.from_env(),
+            )
             body["anchors"] = anchor_reports
             body["anchors_valid"] = anchors_ok
     finally:

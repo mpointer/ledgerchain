@@ -23,10 +23,11 @@ read from the environment:
     ``COMPLIANCE`` (default) or ``GOVERNANCE``. An empty string disables
     Object Lock, for buckets that do not have it enabled.
 
-The S3 client is injectable. Anything with ``put_object(**kwargs)`` and
-``get_object(Bucket=..., Key=...)`` works, which keeps the test suite free
-of network access and credentials. ``boto3`` is only imported when no
-client is supplied (install the ``s3`` extra).
+The S3 client is injectable. Anything with ``put_object(**kwargs)``,
+``get_object(Bucket=..., Key=...)`` and ``list_objects_v2(**kwargs)``
+works, which keeps the test suite free of network access and credentials.
+``boto3`` is only imported when no client is supplied (install the ``s3``
+extra).
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -58,6 +60,8 @@ class ObjectStore(Protocol):
     def put_object(self, **kwargs: Any) -> Any: ...
 
     def get_object(self, **kwargs: Any) -> Any: ...
+
+    def list_objects_v2(self, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,24 @@ def anchor_key(config: AnchorConfig, checkpoint: LedgerCheckpoint) -> str:
     return f"{config.prefix}{checkpoint.from_seq:020d}-{checkpoint.to_seq:020d}.json"
 
 
+_ANCHOR_NAME = re.compile(r"(\d{20})-(\d{20})\.json")
+
+
+def anchored_ranges(config: AnchorConfig, client: ObjectStore) -> list[tuple[int, int]]:
+    """Every ``(from_seq, to_seq)`` anchored under ``config.prefix``, read from the bucket."""
+    ranges: list[tuple[int, int]] = []
+    kwargs: dict[str, Any] = {"Bucket": config.bucket, "Prefix": config.prefix}
+    while True:
+        page = client.list_objects_v2(**kwargs)
+        for obj in page.get("Contents", []):
+            match = _ANCHOR_NAME.fullmatch(obj["Key"][len(config.prefix) :])
+            if match:
+                ranges.append((int(match[1]), int(match[2])))
+        if not page.get("IsTruncated"):
+            return sorted(ranges)
+        kwargs["ContinuationToken"] = page["NextContinuationToken"]
+
+
 def parse_anchor_uri(uri: str) -> tuple[str, str]:
     """Split ``s3://bucket/key`` into ``(bucket, key)``."""
     if not uri.startswith("s3://"):
@@ -165,11 +187,26 @@ def anchor_checkpoint(
     if cfg.object_lock_mode:
         put_kwargs["ObjectLockMode"] = cfg.object_lock_mode
         put_kwargs["ObjectLockRetainUntilDate"] = cfg.retain_until
+    # Write-once. In a versioned (Object Lock) bucket a plain put would add a
+    # newer version that get_object returns, letting a re-anchor of a forged
+    # checkpoint shadow the original witness.
+    put_kwargs["IfNoneMatch"] = "*"
 
+    anchor_uri = f"s3://{cfg.bucket}/{key}"
     try:
         store = client if client is not None else default_client(cfg)
-        store.put_object(**put_kwargs)
-        anchor_uri = f"s3://{cfg.bucket}/{key}"
+        try:
+            store.put_object(**put_kwargs)
+        except Exception as exc:
+            if not _precondition_failed(exc):
+                raise
+            # The key already exists: a retry after a lost commit is fine,
+            # anything else is a forged checkpoint or a shared prefix.
+            existing = verify_anchor(checkpoint, config=cfg, client=store)
+            if not existing.ok:
+                raise RuntimeError(
+                    f"{anchor_uri} already holds a different anchor for this range"
+                ) from exc
         checkpoint.anchor_uri = anchor_uri
         checkpoint.anchor_status = "anchored"
         session.commit()
@@ -182,6 +219,12 @@ def anchor_checkpoint(
         except Exception:  # noqa: BLE001
             session.rollback()
         return AnchorResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+
+
+def _precondition_failed(exc: Exception) -> bool:
+    """S3's 412 answer to ``IfNoneMatch='*'``: the key already exists."""
+    response = getattr(exc, "response", None) or {}
+    return bool(response.get("Error", {}).get("Code") == "PreconditionFailed")
 
 
 def retry_failed_anchors(
@@ -221,14 +264,18 @@ def verify_anchor(
     written when the checkpoint was taken and cannot be changed under
     Object Lock, so a mismatch proves the database row was rewritten after
     anchoring. Never raises.
+
+    The object is located from ``config`` (bucket and prefix) and the
+    checkpoint's range, never from ``anchor_uri`` or ``anchor_status``:
+    those live in the database this check exists to distrust. Verify with
+    the same bucket and prefix the anchors were written with.
     """
-    if checkpoint.anchor_uri is None:
-        return AnchorVerifyResult(ok=False, error="checkpoint has no anchor_uri")
     cfg = config if config is not None else AnchorConfig.from_env()
+    if cfg.bucket is None:
+        return AnchorVerifyResult(ok=False, error="LEDGER_ANCHOR_BUCKET not configured")
     try:
-        bucket, key = parse_anchor_uri(checkpoint.anchor_uri)
         store = client if client is not None else default_client(cfg)
-        response = store.get_object(Bucket=bucket, Key=key)
+        response = store.get_object(Bucket=cfg.bucket, Key=anchor_key(cfg, checkpoint))
         raw = response["Body"].read()
         anchored = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 - report, never raise
@@ -241,3 +288,56 @@ def verify_anchor(
         and anchored.get("prev_checkpoint_root") == checkpoint.prev_checkpoint_root
     )
     return AnchorVerifyResult(ok=matched, matched=matched, anchored=anchored)
+
+
+def verify_anchors(
+    checkpoints: Sequence[LedgerCheckpoint],
+    *,
+    from_seq: int = 1,
+    to_seq: int | None = None,
+    config: AnchorConfig | None = None,
+    client: ObjectStore | None = None,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Cross-check checkpoint rows against what the bucket actually holds.
+
+    Pass every checkpoint overlapping ``[from_seq, to_seq]``. Starts from
+    the bucket listing, so rows cannot hide from the check:
+
+    - an anchor with no checkpoint row of exactly its range fails: rows
+      were deleted, merged, or re-ranged after anchoring;
+    - a row whose anchored copy disagrees with it fails;
+    - a row with no anchor is reported ``unanchored`` (not yet anchored),
+      unless its ``anchor_status`` claims otherwise. The status column can
+      only make this check stricter, never excuse a failure.
+
+    A missing bucket or a listing error fails. Never raises.
+    """
+    cfg = config if config is not None else AnchorConfig.from_env()
+    if cfg.bucket is None:
+        return False, [{"ok": False, "error": "LEDGER_ANCHOR_BUCKET not configured"}]
+    try:
+        store = client if client is not None else default_client(cfg)
+        anchored = {
+            r
+            for r in anchored_ranges(cfg, store)
+            if r[1] >= from_seq and (to_seq is None or r[0] <= to_seq)
+        }
+    except Exception as exc:  # noqa: BLE001 - report, never raise
+        return False, [{"ok": False, "error": f"cannot list anchors: {type(exc).__name__}: {exc}"}]
+
+    rows = {(cp.from_seq, cp.to_seq) for cp in checkpoints}
+    reports: list[dict[str, Any]] = [
+        {"range": list(r), "ok": False, "error": "anchor has no checkpoint row with this range"}
+        for r in sorted(anchored - rows)
+    ]
+    for cp in checkpoints:
+        report: dict[str, Any] = {"id": cp.id, "range": [cp.from_seq, cp.to_seq]}
+        if (cp.from_seq, cp.to_seq) in anchored:
+            result = verify_anchor(cp, config=cfg, client=store)
+            report.update(ok=result.ok, matched=result.matched, error=result.error)
+        elif cp.anchor_status == "anchored":
+            report.update(ok=False, error="row claims anchored but the bucket has no anchor")
+        else:
+            report.update(ok=True, unanchored=True)
+        reports.append(report)
+    return all(r["ok"] for r in reports), reports

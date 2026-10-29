@@ -133,8 +133,8 @@ Configuration can also come from the environment via `AnchorConfig.from_env()`:
 `LEDGER_ANCHOR_OBJECT_LOCK_MODE` (set to an empty string to disable Object
 Lock on buckets without it).
 
-The S3 client is injectable: anything with `put_object(**kw)` and
-`get_object(Bucket=, Key=)`. The test suite uses an in-memory fake and never
+The S3 client is injectable: anything with `put_object(**kw)`,
+`get_object(Bucket=, Key=)` and `list_objects_v2(**kw)`. The test suite uses an in-memory fake and never
 touches the network.
 
 ## CLI
