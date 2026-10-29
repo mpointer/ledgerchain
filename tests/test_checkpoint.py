@@ -107,7 +107,7 @@ def test_forced_ledger_append_failure_leaves_no_checkpoint_row(db, monkeypatch):
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated ledger append failure")
 
-    monkeypatch.setattr(checkpoint_module.LedgerWriter, "append", staticmethod(_boom))
+    monkeypatch.setattr(checkpoint_module, "_append", _boom)
     with pytest.raises(RuntimeError):
         build_checkpoint(db)
     db.rollback()

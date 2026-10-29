@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from .canonical import sha256_hex
 from .checkpoint import merkle_root
 from .models import DecisionLedgerEntry, LedgerCheckpoint, LedgerHead
-from .writer import GENESIS_PREV_HASH, compute_entry_hash
+from .writer import CHECKPOINT_EVENT_TYPE, GENESIS_PREV_HASH, compute_entry_hash
 
 
 @dataclass
@@ -71,8 +71,11 @@ def verify_chain(
 
     With ``check_checkpoints=True`` every checkpoint overlapping the range
     is listed and its Merkle root is recomputed from the stored entry
-    hashes it covers. A checkpoint row whose root or range no longer
+    hashes it covers, and must start right after the previous checkpoint and
+    carry its root. A checkpoint row whose root, range, or link no longer
     matches reports ``root_valid=False`` and makes the whole result invalid.
+    Every ``checkpoint`` entry walked must also have a row that agrees with
+    it, so deleting or editing checkpoint rows is caught.
     """
     start_seq = 1 if from_seq is None or from_seq <= 1 else from_seq
     expected_prev = GENESIS_PREV_HASH
@@ -97,6 +100,7 @@ def verify_chain(
     expected_seq = start_seq
     checked = 0
     last_entry: DecisionLedgerEntry | None = None
+    checkpoint_entries: list[DecisionLedgerEntry] = []
     for entry in entries:
         checked += 1
         if entry.seq != expected_seq:
@@ -141,6 +145,8 @@ def verify_chain(
         expected_prev = entry.entry_hash
         expected_seq += 1
         last_entry = entry
+        if entry.event_type == CHECKPOINT_EVENT_TYPE:
+            checkpoint_entries.append(entry)
 
     head_valid = True
     head = session.execute(select(LedgerHead)).scalar_one_or_none()
@@ -166,7 +172,18 @@ def verify_chain(
     checkpoints_valid = all(cp["root_valid"] is not False for cp in checkpoints)
     if head_valid and not checkpoints_valid and reason is None:
         bad = next(cp for cp in checkpoints if cp["root_valid"] is False)
-        reason = f"checkpoint {bad['id']} root does not match the entries it covers"
+        reason = f"checkpoint {bad['id']}: {bad['root_reason']}"
+
+    if check_checkpoints and head_valid and checkpoints_valid:
+        mismatch = _checkpoint_entry_mismatch(session, checkpoint_entries)
+        if mismatch is not None:
+            return VerifyResult(
+                valid=False,
+                checked_entries=checked,
+                first_bad_seq=mismatch[0],
+                reason=mismatch[1],
+                checkpoints=checkpoints,
+            )
 
     return VerifyResult(
         valid=head_valid and checkpoints_valid,
@@ -186,6 +203,7 @@ def _checkpoint_summaries(
     query = query.order_by(LedgerCheckpoint.from_seq.asc())
 
     summaries: list[dict[str, Any]] = []
+    prev: LedgerCheckpoint | None = None
     for cp in session.execute(query).scalars().all():
         hashes = (
             session.execute(
@@ -211,8 +229,44 @@ def _checkpoint_summaries(
         else:
             root_valid = True
             root_reason = None
+        # Checkpoints tile the ledger: each starts right after the previous
+        # one and carries its root. The first listed one is only checkable
+        # when it starts at seq 1; a partial range does not see its predecessor.
+        if root_valid and (prev is not None or cp.from_seq == 1):
+            want_from = prev.to_seq + 1 if prev is not None else 1
+            want_root = prev.merkle_root if prev is not None else None
+            if cp.from_seq != want_from or cp.prev_checkpoint_root != want_root:
+                root_valid = False
+                root_reason = (
+                    f"does not chain from checkpoint {prev.id}"
+                    if prev is not None
+                    else "first checkpoint must have no prev_checkpoint_root"
+                )
+        prev = cp
         summary = cp.to_dict()
         summary["root_valid"] = root_valid
         summary["root_reason"] = root_reason
         summaries.append(summary)
     return summaries
+
+
+_CHECKPOINT_FIELDS = ("from_seq", "to_seq", "merkle_root", "prev_checkpoint_root")
+
+
+def _checkpoint_entry_mismatch(
+    session: Session, entries: list[DecisionLedgerEntry]
+) -> tuple[int, str] | None:
+    """Every checkpoint entry in the chain must have a row that agrees with it.
+
+    The entries are hash-chained and trigger-protected; the
+    ``ledger_checkpoint`` table is neither, so the entries are the authority.
+    Returns ``(seq, reason)`` for the first disagreement.
+    """
+    for entry in entries:
+        cp_id = entry.payload.get("checkpoint_id")
+        row = session.get(LedgerCheckpoint, cp_id) if isinstance(cp_id, int) else None
+        if row is None:
+            return entry.seq, f"checkpoint entry at seq={entry.seq} has no checkpoint row {cp_id}"
+        if any(getattr(row, f) != entry.payload.get(f) for f in _CHECKPOINT_FIELDS):
+            return entry.seq, f"checkpoint {row.id} row disagrees with its entry at seq={entry.seq}"
+    return None
