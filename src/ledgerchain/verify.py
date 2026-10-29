@@ -13,10 +13,15 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .canonical import sha256_hex
 from .checkpoint import merkle_root
 from .models import DecisionLedgerEntry, LedgerCheckpoint, LedgerHead
-from .writer import CHECKPOINT_EVENT_TYPE, GENESIS_PREV_HASH, compute_entry_hash
+from .writer import (
+    CHECKPOINT_EVENT_TYPE,
+    GENESIS_PREV_HASH,
+    REDACTION_EVENT_TYPE,
+    compute_entry_hash,
+    payload_digest,
+)
 
 
 @dataclass
@@ -28,6 +33,9 @@ class VerifyResult:
     break, ``head_valid=False`` means the entries check out but the head
     row disagrees, and a checkpoint with ``root_valid=False`` means a
     checkpoint row no longer matches the entries it covers.
+
+    ``redacted`` lists the seqs whose payload was erased through
+    :meth:`ledgerchain.LedgerWriter.redact`. That is not a failure.
     """
 
     valid: bool
@@ -36,6 +44,7 @@ class VerifyResult:
     reason: str | None = None
     head_valid: bool = True
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    redacted: list[int] = field(default_factory=list)
 
     @property
     def checkpoints_valid(self) -> bool:
@@ -50,6 +59,7 @@ class VerifyResult:
             "head_valid": self.head_valid,
             "checkpoints_valid": self.checkpoints_valid,
             "checkpoints": self.checkpoints,
+            "redacted": self.redacted,
         }
 
 
@@ -106,6 +116,7 @@ def verify_chain(
     checked = 0
     last_entry: DecisionLedgerEntry | None = None
     checkpoint_entries: list[DecisionLedgerEntry] = []
+    redacted: list[int] = []
     try:
         for entry in entries:
             checked += 1
@@ -119,7 +130,22 @@ def verify_chain(
                         "(row deleted or reordered)"
                     ),
                 )
-            if sha256_hex(entry.payload) != entry.payload_sha256:
+            if entry.hash_version not in (1, 2) or entry.hash_version < min_version:
+                return VerifyResult(
+                    valid=False,
+                    checked_entries=checked,
+                    first_bad_seq=entry.seq,
+                    reason=(
+                        f"hash_version {entry.hash_version} is unknown or older than {min_version}"
+                    ),
+                )
+            min_version = entry.hash_version
+            # A redacted payload cannot be rehashed; entry_hash still covers
+            # payload_sha256, and the redaction record is checked below.
+            salt = entry.payload_salt if entry.hash_version >= 2 else None
+            if entry.payload is None:
+                redacted.append(entry.seq)
+            elif payload_digest(entry.payload, salt) != entry.payload_sha256:
                 return VerifyResult(
                     valid=False,
                     checked_entries=checked,
@@ -133,16 +159,6 @@ def verify_chain(
                     first_bad_seq=entry.seq,
                     reason="prev_hash does not chain from the prior entry",
                 )
-            if entry.hash_version not in (1, 2) or entry.hash_version < min_version:
-                return VerifyResult(
-                    valid=False,
-                    checked_entries=checked,
-                    first_bad_seq=entry.seq,
-                    reason=(
-                        f"hash_version {entry.hash_version} is unknown or older than {min_version}"
-                    ),
-                )
-            min_version = entry.hash_version
             recomputed = compute_entry_hash(
                 prev_hash=entry.prev_hash,
                 payload_sha256=entry.payload_sha256,
@@ -168,6 +184,16 @@ def verify_chain(
                 checkpoint_entries.append(entry)
     finally:
         entries.close()
+
+    unexplained = _unexplained_redactions(session, redacted)
+    if unexplained is not None:
+        return VerifyResult(
+            valid=False,
+            checked_entries=checked,
+            first_bad_seq=unexplained,
+            reason="payload removed without a redaction entry",
+            redacted=redacted,
+        )
 
     head_valid = True
     head = session.execute(select(LedgerHead)).scalar_one_or_none()
@@ -204,6 +230,7 @@ def verify_chain(
                 first_bad_seq=mismatch[0],
                 reason=mismatch[1],
                 checkpoints=checkpoints,
+                redacted=redacted,
             )
 
     return VerifyResult(
@@ -212,6 +239,7 @@ def verify_chain(
         head_valid=head_valid,
         reason=reason,
         checkpoints=checkpoints,
+        redacted=redacted,
     )
 
 
@@ -284,6 +312,8 @@ def _checkpoint_entry_mismatch(
     Returns ``(seq, reason)`` for the first disagreement.
     """
     for entry in entries:
+        if entry.payload is None:
+            return entry.seq, f"checkpoint entry at seq={entry.seq} had its payload removed"
         cp_id = entry.payload.get("checkpoint_id")
         row = session.get(LedgerCheckpoint, cp_id) if isinstance(cp_id, int) else None
         if row is None:
@@ -291,3 +321,22 @@ def _checkpoint_entry_mismatch(
         if any(getattr(row, f) != entry.payload.get(f) for f in _CHECKPOINT_FIELDS):
             return entry.seq, f"checkpoint {row.id} row disagrees with its entry at seq={entry.seq}"
     return None
+
+
+def _unexplained_redactions(session: Session, redacted: list[int]) -> int | None:
+    """First redacted seq with no later ``redaction`` entry naming it.
+
+    The redaction entries are looked up across the whole ledger, so a
+    partial-range verify accepts one outside its range; a full verify also
+    checks that entry's own hash.
+    """
+    if not redacted:
+        return None
+    explained: dict[int, int] = {}
+    for record in session.scalars(
+        select(DecisionLedgerEntry).where(DecisionLedgerEntry.event_type == REDACTION_EVENT_TYPE)
+    ):
+        target = record.payload.get("seq") if record.payload is not None else None
+        if isinstance(target, int):
+            explained[target] = max(explained.get(target, 0), record.seq)
+    return next((seq for seq in redacted if explained.get(seq, 0) <= seq), None)

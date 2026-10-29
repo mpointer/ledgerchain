@@ -29,10 +29,11 @@ do is in [docs/why-ledgerchain.md](docs/why-ledgerchain.md).
 |---|---|---|
 | A payload is edited in place | `payload_sha256` over RFC 8785 canonical JSON | `verify_chain` names the seq |
 | The actor or subject is rewritten | both are inside `entry_hash` (hash version 2) | `verify_chain` names the seq |
+| A payload is quietly deleted | the only permitted update is a redaction, which must be recorded | `verify_chain` names the seq |
 | A row is deleted or reordered | strictly contiguous `seq`, each `entry_hash` includes `str(seq)` | `verify_chain` names the seq after the gap |
 | The head pointer is forged | `ledger_head` compared against the last recomputed hash | `verify_chain(head_valid=False)` |
 | A checkpoint row is rewritten | Merkle root recomputed over the entries it covers | `verify_chain` marks `root_valid=False` |
-| The app role updates or deletes | BEFORE UPDATE/DELETE triggers raise (checkpoints: only anchor status may change) | the write fails |
+| The app role updates or deletes | BEFORE UPDATE/DELETE triggers raise, except for a payload redaction (and, on checkpoints, the anchor status) | the write fails |
 | An anchor is overwritten or hidden in the bucket | verification lists object versions and reads the oldest | `verify_anchors` fails |
 | A superuser rewrites the whole chain consistently | checkpoint roots anchored under Object Lock | `verify_anchor` compares the live row to the anchored copy |
 
@@ -92,7 +93,7 @@ $ echo $?
 ## How the chain is built
 
 ```
-payload_sha256 = sha256( RFC8785(payload) )
+payload_sha256 = sha256( RFC8785({ "payload": payload, "salt": payload_salt }) )   # 32 random bytes per entry
 entry_hash     = sha256( RFC8785([ "ledgerchain/v2", prev_hash, payload_sha256, seq,
                                    event_type, ts_rfc3339_utc, tenant_id, actor, subject_uri ]) )
 ```
@@ -109,6 +110,35 @@ entry_hash     = sha256( RFC8785([ "ledgerchain/v2", prev_hash, payload_sha256, 
   forward along the chain, so a row cannot be rewritten back to version 1.
 - `event_type` is yours to define. Only `"genesis"` is reserved;
   `"checkpoint"` is what `build_checkpoint` writes.
+
+## Erasing personal data
+
+Payloads are permanent unless redacted. When a data-subject request
+requires erasing one:
+
+```python
+LedgerWriter.redact(
+    session,
+    seq,
+    actor={"kind": "human", "sub": "dpo-1"},
+    tenant_id="acme",
+    reason="GDPR art. 17 request #42",
+)
+session.commit()
+```
+
+This sets the payload to JSON null and deletes its salt. Every hashed
+column is untouched, so the chain, checkpoints and anchors keep verifying.
+A `redaction` entry records the seq, the reason and who asked.
+`verify_chain(...).redacted` lists erased seqs, and verification fails on
+any payload that was removed without that record. Deciding who may redact
+is your application's job.
+
+The per-entry salt is what makes the erasure real. Without it, the
+`payload_sha256` left behind could be brute-forced back to a
+low-entropy payload such as a national ID number. Rows written before 0.3
+have no salt; a guessable payload in one of them may still be recoverable
+from its hash after redaction.
 
 ## Checkpoints and anchoring
 
@@ -182,11 +212,13 @@ def upgrade():
 
 Table names are `decision_ledger`, `ledger_head`, `ledger_checkpoint`.
 
-Upgrading from 0.2.x adds one column. Existing rows default to hash
-version 1, and the statement fires no row triggers:
+Upgrading from 0.2.x adds two columns. Existing rows default to hash
+version 1, and neither statement fires row triggers. Then re-run
+`install_immutability`, which is idempotent, to replace the triggers:
 
 ```sql
 ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1;
+ALTER TABLE decision_ledger ADD COLUMN payload_salt CHAR(64);
 ```
 
 **Writes.** Call `LedgerWriter.append` inside the same session and

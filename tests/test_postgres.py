@@ -13,7 +13,7 @@ import threading
 import uuid
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import JSON, create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 import ledgerchain.checkpoint as checkpoint_module
@@ -163,3 +163,22 @@ def test_checkpoint_guard_trigger(pg):
     pg.execute(table.update().values(anchor_status="anchored", anchor_uri="s3://b/k"))
     pg.commit()
     assert pg.get(LedgerCheckpoint, cp.id).merkle_root == cp.merkle_root
+
+
+def test_redaction_passes_the_trigger_and_nothing_else_does(pg):
+    _append(pg, {"ssn": "123-45-6789"})
+    seq = _append(pg, {"ssn": "987-65-4321"}).seq
+    table = DecisionLedgerEntry.__table__
+    for values in ({"payload": {"ssn": "x"}}, {"payload": JSON.NULL, "actor": {"sub": "x"}}):
+        with pytest.raises(Exception, match="append-only"):
+            pg.execute(table.update().where(DecisionLedgerEntry.seq == seq).values(**values))
+            pg.commit()
+        pg.rollback()
+
+    LedgerWriter.redact(pg, seq, actor={"kind": "human"}, tenant_id="t", reason="erasure")
+    pg.commit()
+    pg.expire_all()
+    assert pg.get(DecisionLedgerEntry, seq).payload is None
+    result = verify_chain(pg)
+    assert result.valid, result.reason
+    assert result.redacted == [seq]

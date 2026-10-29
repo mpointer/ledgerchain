@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `LedgerWriter.redact(session, seq, actor=, tenant_id=, reason=)` erases an
+  entry's payload for good, for GDPR and CCPA erasure requests. Every hashed
+  column stays as it was, so the chain, checkpoints and anchors keep
+  verifying. A reserved `redaction` entry records the seq, the reason and the
+  actor. `VerifyResult.redacted` lists erased seqs, and verification fails
+  on a payload removed without a redaction entry. The immutability trigger
+  allows that one update and nothing else.
+
 ### Security
 
 - Entry hash version 2 covers `actor` and `subject_uri`. Version 1 hashed
@@ -13,6 +23,11 @@ All notable changes to this project are documented here. The format follows
   anchor. Version 2 hashes the fields as an RFC 8785 JSON array. The old
   newline-joined form was also ambiguous: a newline inside `event_type` or
   `tenant_id` could shift content between fields without changing the hash.
+- Hash version 2 commits to each payload with a random 32-byte salt:
+  `payload_sha256 = sha256(RFC8785({"payload": ..., "salt": ...}))`. The
+  salt lives in `payload_salt`, and redaction erases it along with the
+  payload. Otherwise the hash left behind could be brute-forced back to a
+  low-entropy payload. Version 1 rows are unsalted.
 - Each row records `hash_version`. The writer stamps 2. Version 1 rows keep
   verifying, and `verify_chain` rejects a version lower than the one before
   it, so a v2 row cannot be quietly rewritten as v1.
@@ -51,18 +66,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Upgrading
 
-- Add the column before deploying. Existing rows become version 1, and the
-  statement fires no row triggers:
+- Add two columns before deploying. Existing rows become version 1, and
+  neither statement fires row triggers:
   `ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1;`
-  In Alembic, add the column with `server_default="1"`.
+  `ALTER TABLE decision_ledger ADD COLUMN payload_salt CHAR(64);`
+  In Alembic, give `hash_version` a `server_default="1"`. Then re-run
+  `install_immutability`, which is idempotent. The new triggers reference
+  both columns and allow redaction.
+- `"redaction"` is a reserved event type, like `"genesis"` and
+  `"checkpoint"`. `LedgerWriter.append` rejects it.
+- `payload_digest(payload, salt)` is exported for auditors who recompute
+  `payload_sha256` outside the library.
 - `compute_entry_hash` takes `actor`, `subject_uri` and `hash_version`.
   Its default is still `hash_version=1`. An auditor recomputing new rows
   outside the library must pass the row's `hash_version` and use the v2
   layout from the README.
 - `HASH_VERSION` is exported. `DecisionLedgerEntry.to_dict()` includes
   `hash_version`.
-- Re-run `install_immutability` (it is idempotent) to add the
-  `ledger_checkpoint` trigger to an existing database.
 - Anchor verification lists object versions. The S3 client needs
   `list_object_versions` and `get_object(VersionId=...)` instead of
   `list_objects_v2`. On AWS, the verifying role needs

@@ -27,8 +27,10 @@ from .writer import (
     GENESIS_EVENT_TYPE,
     GENESIS_PREV_HASH,
     HASH_VERSION,
+    REDACTION_EVENT_TYPE,
     LedgerWriter,
     compute_entry_hash,
+    payload_digest,
 )
 
 __version__ = _dist_version("ledgerchain")  # single source: pyproject.toml
@@ -45,6 +47,7 @@ __all__ = [
     "GENESIS_EVENT_TYPE",
     "GENESIS_PREV_HASH",
     "HASH_VERSION",
+    "REDACTION_EVENT_TYPE",
     "LedgerCheckpoint",
     "LedgerHead",
     "LedgerWriter",
@@ -58,6 +61,7 @@ __all__ = [
     "drop_immutability",
     "install_immutability",
     "merkle_root",
+    "payload_digest",
     "metadata",
     "retry_failed_anchors",
     "sha256_hex",

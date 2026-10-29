@@ -100,8 +100,13 @@ class DecisionLedgerEntry(Base):
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     actor: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False)
     subject_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False)
+    # JSON null (Python None) once redacted; the SQL column stays NOT NULL.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=False)
     payload_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    # Random per-entry salt inside the payload commitment (hash version 2).
+    # Erased with the payload on redaction, so the hash left behind cannot be
+    # brute-forced back to low-entropy content.
+    payload_salt: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
     prev_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     entry_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False, unique=True)
 
@@ -121,6 +126,7 @@ class DecisionLedgerEntry(Base):
             "actor": self.actor,
             "subject_uri": self.subject_uri,
             "payload": self.payload,
+            "redacted": self.payload is None,
             "payload_sha256": self.payload_sha256,
             "prev_hash": self.prev_hash,
             "entry_hash": self.entry_hash,
