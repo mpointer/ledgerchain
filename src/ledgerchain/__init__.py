@@ -13,6 +13,7 @@ from .anchor import (
     anchor_payload,
     retry_failed_anchors,
     verify_anchor,
+    verify_anchors,
 )
 from .canonical import CanonicalizationError, canonicalize, sha256_hex
 from .checkpoint import CheckpointResult, build_checkpoint, merkle_root
@@ -57,6 +58,7 @@ __all__ = [
     "retry_failed_anchors",
     "sha256_hex",
     "verify_anchor",
+    "verify_anchors",
     "verify_chain",
     "__version__",
 ]

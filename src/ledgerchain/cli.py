@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .anchor import AnchorConfig, anchor_checkpoint, retry_failed_anchors, verify_anchor
+from .anchor import AnchorConfig, anchor_checkpoint, retry_failed_anchors, verify_anchors
 from .checkpoint import build_checkpoint
 from .immutability import create_all
 from .models import LedgerCheckpoint
@@ -61,29 +61,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
         body = result.to_dict()
         anchors_ok = True
         if args.check_anchors:
-            config = AnchorConfig.from_env()
-            anchor_reports = []
-            # Every checkpoint is read back, whatever anchor_status says: the
-            # status is a database column an attacker can flip to skip this.
-            for summary in result.checkpoints:
-                cp = session.get(LedgerCheckpoint, summary["id"])
-                if cp is None:
-                    continue
-                report = verify_anchor(cp, config=config)
-                # An unreadable object for a checkpoint never marked anchored is
-                # the eventual-consistency window, not a failure.
-                unanchored = report.matched is None and cp.anchor_status != "anchored"
-                anchors_ok = anchors_ok and (report.ok or unanchored)
-                anchor_reports.append(
-                    {
-                        "id": cp.id,
-                        "anchor_status": cp.anchor_status,
-                        "ok": report.ok,
-                        "matched": report.matched,
-                        "unanchored": unanchored,
-                        "error": report.error,
-                    }
-                )
+            rows = [session.get(LedgerCheckpoint, s["id"]) for s in result.checkpoints]
+            anchors_ok, anchor_reports = verify_anchors(
+                [cp for cp in rows if cp is not None],
+                from_seq=args.from_seq or 1,
+                to_seq=args.to_seq,
+                config=AnchorConfig.from_env(),
+            )
             body["anchors"] = anchor_reports
             body["anchors_valid"] = anchors_ok
     finally:

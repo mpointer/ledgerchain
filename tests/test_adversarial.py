@@ -12,7 +12,7 @@ import json
 
 import pytest
 from conftest import FakeS3, seed
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 import ledgerchain.checkpoint as checkpoint_module
@@ -22,6 +22,7 @@ from ledgerchain import (
     anchor_checkpoint,
     build_checkpoint,
     create_all,
+    merkle_root,
     verify_anchor,
     verify_chain,
 )
@@ -181,4 +182,41 @@ class TestCliCheckAnchors:
         s3.objects.clear()
 
         code, body = self._verify(url, capsys)
-        assert code == 1 and body["anchors"][0]["unanchored"] is False
+        assert code == 1 and "no anchor" in body["anchors"][0]["error"]
+
+    def test_merging_anchored_checkpoints_into_a_fresh_one_is_detected(self, url, s3, capsys):
+        """A consistent rewrite replaces the anchored rows with one new, never
+        anchored range. The derived key does not exist, so only the bucket
+        listing can tell: the old anchors no longer match any row."""
+        session = self._session(url)
+        seed(session)
+        cp = build_checkpoint(session).checkpoint
+        assert anchor_checkpoint(session, cp, config=CONFIG, client=s3).ok
+        session.execute(LedgerCheckpoint.__table__.delete())
+        hashes = session.scalars(
+            select(DecisionLedgerEntry.entry_hash).order_by(DecisionLedgerEntry.seq)
+        ).all()
+        session.add(
+            LedgerCheckpoint(
+                from_seq=1,
+                to_seq=len(hashes),
+                merkle_root=merkle_root(hashes),
+                anchor_status="pending",
+            )
+        )
+        session.commit()
+        session.close()
+
+        code, body = self._verify(url, capsys)
+        assert code == 1 and body["anchors_valid"] is False
+        assert body["anchors"][0]["error"] == "anchor has no checkpoint row with this range"
+
+    def test_missing_bucket_config_fails(self, url, monkeypatch, capsys):
+        session = self._session(url)
+        seed(session)
+        build_checkpoint(session)
+        session.close()
+        monkeypatch.delenv("LEDGER_ANCHOR_BUCKET")
+
+        code, body = self._verify(url, capsys)
+        assert code == 1 and "not configured" in body["anchors"][0]["error"]

@@ -17,9 +17,14 @@ All notable changes to this project are documented here. The format follows
   versioned Object Lock bucket the forged copy became the version
   `get_object` returns. Re-anchoring an unchanged checkpoint still succeeds.
   The `s3` extra now requires `boto3>=1.35.2`.
-- `ledgerchain verify --check-anchors` reads back every checkpoint, not only
-  those whose `anchor_status` says `anchored`. A checkpoint never marked
-  anchored and with no object yet is reported as `unanchored`, not a failure.
+- `ledgerchain verify --check-anchors` (now `verify_anchors`) starts from a
+  listing of the bucket instead of trusting `anchor_status`, which a
+  superuser could flip to skip checkpoints. Every anchor must match a
+  checkpoint row of exactly its range, so deleting, merging, or re-ranging
+  anchored checkpoints is detected. Rows with no anchor are reported as
+  `unanchored`; `anchor_status` can only make the check stricter. A missing
+  bucket configuration now fails instead of passing. The S3 client needs
+  `list_objects_v2` in addition to `put_object` and `get_object`.
 
 ### Fixed
 

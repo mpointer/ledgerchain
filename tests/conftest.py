@@ -116,5 +116,11 @@ class FakeS3:
             raise KeyError(f"NoSuchKey: {key}")
         return {"Body": FakeBody(self.objects[key])}
 
+    def list_objects_v2(self, **kwargs):
+        keys = sorted(
+            k for b, k in self.objects if b == kwargs["Bucket"] and k.startswith(kwargs["Prefix"])
+        )
+        return {"Contents": [{"Key": k} for k in keys], "IsTruncated": False}
+
     def stored_json(self, bucket: str, key: str) -> dict:
         return json.loads(self.objects[(bucket, key)])
