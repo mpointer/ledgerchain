@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import DecisionLedgerEntry, LedgerCheckpoint, LedgerHead
-from .writer import CHECKPOINT_EVENT_TYPE, LedgerWriter
+from .writer import CHECKPOINT_EVENT_TYPE, _append
 
 CHECKPOINT_ACTOR: dict[str, Any] = {"kind": "system", "sub": "ledger-checkpoint"}
 
@@ -117,7 +117,7 @@ def build_checkpoint(
     session.add(checkpoint)
     session.flush()
 
-    LedgerWriter.append(
+    _append(
         session,
         event_type=CHECKPOINT_EVENT_TYPE,
         payload={

@@ -33,6 +33,11 @@ All notable changes to this project are documented here. The format follows
   immutability triggers, so the application role could previously delete or
   edit checkpoint rows undetected. A ledger whose checkpoint chain already
   forked (see the next item) now reports invalid, which is accurate.
+- `LedgerWriter.append` rejects `event_type="checkpoint"`, which was
+  documented as reserved but not enforced. The verifier now trusts every
+  `checkpoint` entry as the record of a checkpoint row, so an application
+  event of that type would make verification fail. Ledgers that already
+  contain such application events will report invalid.
 
 ### Fixed
 

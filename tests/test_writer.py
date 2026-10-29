@@ -46,9 +46,13 @@ def test_genesis_only_created_once(db):
     assert len(rows) == 1
 
 
-def test_genesis_event_type_is_reserved(db):
+@pytest.mark.parametrize("event_type", ["genesis", "checkpoint"])
+def test_reserved_event_types_are_rejected(db, event_type):
+    # verify_chain treats every checkpoint entry as the record of a checkpoint
+    # row, so a caller-written one would poison verification.
     with pytest.raises(ValueError, match="reserved"):
-        LedgerWriter.append(db, event_type="genesis", payload={}, actor={}, tenant_id="acme")
+        LedgerWriter.append(db, event_type=event_type, payload={}, actor={}, tenant_id="acme")
+    assert db.query(DecisionLedgerEntry).count() == 0
 
 
 def test_seq_is_global_not_per_tenant(db):
