@@ -81,7 +81,7 @@ def test_nulling_a_payload_without_a_redaction_record_is_detected(immutable_db):
 
 def test_reserved_and_repeat_redactions_are_refused(db):
     seed(db)
-    checkpoint_entry = build_checkpoint(db).checkpoint.to_seq + 1
+    checkpoint_entry = build_checkpoint(db, tenant_id="acme").checkpoint.to_seq + 1
     record = _redact(db, 3)
     for seq in (1, checkpoint_entry, record.seq):  # genesis, checkpoint, redaction
         with pytest.raises(ValueError, match="cannot be redacted"):
@@ -122,4 +122,59 @@ def test_legacy_v1_rows_can_be_redacted(tmp_path):
         result = verify_chain(session)
         assert result.valid, result.reason
         assert result.redacted == [2]
+    engine.dispose()
+
+
+def test_redacting_another_tenants_entry_is_refused(db):
+    LedgerWriter.append(db, event_type="e", payload={"pii": "x"}, actor={}, tenant_id="globex")
+    db.commit()
+    with pytest.raises(PermissionError, match="does not belong to tenant 'acme'"):
+        LedgerWriter.redact(db, 2, actor=DPO, tenant_id="acme", reason="x")
+    db.rollback()
+    assert db.get(DecisionLedgerEntry, 2).payload == {"pii": "x"}
+
+
+def test_a_redaction_record_from_another_tenant_does_not_count(db):
+    from ledgerchain.writer import _append
+
+    seq = seed(db)[1].seq  # tenant "acme"
+    _raw_update(db, seq, payload=JSON.NULL, payload_salt=None)
+    _append(
+        db,
+        event_type=REDACTION_EVENT_TYPE,
+        payload={"seq": seq, "reason": "x"},
+        actor=DPO,
+        tenant_id="globex",
+    )
+    db.commit()
+    result = verify_chain(db)
+    assert result.valid is False and result.first_bad_seq == seq
+
+
+def test_partial_range_finds_the_record_beyond_its_end(db):
+    seq = seed(db)[1].seq
+    record = _redact(db, seq)
+    result = verify_chain(db, to_seq=record.seq - 1)
+    assert result.valid, result.reason
+    assert result.redacted == [seq]
+
+
+def test_redact_rereads_a_row_another_session_already_redacted(tmp_path):
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'r.db'}")
+    from ledgerchain import create_all
+
+    create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as setup:
+        seq = seed(setup)[1].seq
+    stale = Session()
+    cached = stale.get(DecisionLedgerEntry, seq)
+    assert cached.payload is not None
+    with Session() as other:
+        _redact(other, seq)
+    with pytest.raises(ValueError, match="already redacted"):
+        LedgerWriter.redact(stale, seq, actor=DPO, tenant_id="acme", reason="again")
+    stale.close()
     engine.dispose()

@@ -13,7 +13,9 @@ All notable changes to this project are documented here. The format follows
   verifying. A reserved `redaction` entry records the seq, the reason and the
   actor. `VerifyResult.redacted` lists erased seqs, and verification fails
   on a payload removed without a redaction entry. The immutability trigger
-  allows that one update and nothing else.
+  allows that one update and nothing else. Only the payload is erasable:
+  `actor`, `subject_uri`, `event_type`, `tenant_id` and the reason are
+  permanent, so keep personal data out of them.
 
 ### Security
 

@@ -166,17 +166,29 @@ class LedgerWriter:
         column stays as it was, so ``entry_hash``, checkpoints and anchors
         still verify. Then appends a ``redaction`` entry recording ``seq``,
         ``reason`` and ``actor``, so the erasure is itself on the record.
+        ``tenant_id`` must be the entry's own tenant.
         ``verify_chain`` reports redacted seqs and fails on a payload that
         was removed without such an entry.
+
+        Only the payload is erased. ``actor``, ``subject_uri``,
+        ``event_type``, ``tenant_id`` and this call's ``reason`` are hashed
+        and permanent, and the redaction entry itself cannot be redacted, so
+        keep personal data out of all of them.
 
         Runs inside the caller's transaction and never commits, like
         :meth:`append`. Deciding who may redact is the caller's job.
         Version 1 rows have no salt: their remaining ``payload_sha256`` is a
         plain hash and a guessable payload could be recovered from it.
         """
-        entry = session.get(DecisionLedgerEntry, seq)
+        # Locked and re-read: a copy cached in this session could miss a
+        # redaction another session just committed.
+        entry = session.get(DecisionLedgerEntry, seq, populate_existing=True, with_for_update=True)
         if entry is None:
             raise LookupError(f"no ledger entry at seq={seq}")
+        # seq is global across tenants: a caller authorized for one tenant
+        # must not erase another's entry with it.
+        if entry.tenant_id != tenant_id:
+            raise PermissionError(f"entry seq={seq} does not belong to tenant {tenant_id!r}")
         if entry.event_type in RESERVED_EVENT_TYPES:
             raise ValueError(f"{entry.event_type!r} entries cannot be redacted")
         if entry.payload is None:

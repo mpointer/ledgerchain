@@ -116,7 +116,9 @@ def verify_chain(
     checked = 0
     last_entry: DecisionLedgerEntry | None = None
     checkpoint_entries: list[DecisionLedgerEntry] = []
-    redacted: list[int] = []
+    redacted: dict[int, str] = {}  # redacted seq -> its tenant
+    # (redacted seq, tenant) -> latest redaction entry naming it from that tenant
+    explained: dict[tuple[int, str], int] = {}
     try:
         for entry in entries:
             checked += 1
@@ -144,7 +146,7 @@ def verify_chain(
             # payload_sha256, and the redaction record is checked below.
             salt = entry.payload_salt if entry.hash_version >= 2 else None
             if entry.payload is None:
-                redacted.append(entry.seq)
+                redacted[entry.seq] = entry.tenant_id
             elif payload_digest(entry.payload, salt) != entry.payload_sha256:
                 return VerifyResult(
                     valid=False,
@@ -182,17 +184,19 @@ def verify_chain(
             last_entry = entry
             if entry.event_type == CHECKPOINT_EVENT_TYPE:
                 checkpoint_entries.append(entry)
+            elif entry.event_type == REDACTION_EVENT_TYPE:
+                _note_redaction(explained, entry)
     finally:
         entries.close()
 
-    unexplained = _unexplained_redactions(session, redacted)
+    unexplained = _unexplained_redactions(session, redacted, explained, last_entry)
     if unexplained is not None:
         return VerifyResult(
             valid=False,
             checked_entries=checked,
             first_bad_seq=unexplained,
             reason="payload removed without a redaction entry",
-            redacted=redacted,
+            redacted=list(redacted),
         )
 
     head_valid = True
@@ -230,7 +234,7 @@ def verify_chain(
                 first_bad_seq=mismatch[0],
                 reason=mismatch[1],
                 checkpoints=checkpoints,
-                redacted=redacted,
+                redacted=list(redacted),
             )
 
     return VerifyResult(
@@ -239,7 +243,7 @@ def verify_chain(
         head_valid=head_valid,
         reason=reason,
         checkpoints=checkpoints,
-        redacted=redacted,
+        redacted=list(redacted),
     )
 
 
@@ -323,20 +327,37 @@ def _checkpoint_entry_mismatch(
     return None
 
 
-def _unexplained_redactions(session: Session, redacted: list[int]) -> int | None:
-    """First redacted seq with no later ``redaction`` entry naming it.
+def _note_redaction(explained: dict[tuple[int, str], int], record: DecisionLedgerEntry) -> None:
+    target = record.payload.get("seq") if record.payload is not None else None
+    if isinstance(target, int):
+        key = (target, record.tenant_id)
+        explained[key] = max(explained.get(key, 0), record.seq)
 
-    The redaction entries are looked up across the whole ledger, so a
-    partial-range verify accepts one outside its range; a full verify also
-    checks that entry's own hash.
+
+def _unexplained_redactions(
+    session: Session,
+    redacted: dict[int, str],
+    explained: dict[tuple[int, str], int],
+    last_entry: DecisionLedgerEntry | None,
+) -> int | None:
+    """First redacted seq with no later ``redaction`` entry naming it from
+    the same tenant.
+
+    Records come from the walk. Only when one is still missing, and the
+    walk stopped short of the end of the ledger, are later entries looked up
+    by seq range; a full verify also checks those entries' own hashes.
     """
-    if not redacted:
-        return None
-    explained: dict[int, int] = {}
-    for record in session.scalars(
-        select(DecisionLedgerEntry).where(DecisionLedgerEntry.event_type == REDACTION_EVENT_TYPE)
-    ):
-        target = record.payload.get("seq") if record.payload is not None else None
-        if isinstance(target, int):
-            explained[target] = max(explained.get(target, 0), record.seq)
-    return next((seq for seq in redacted if explained.get(seq, 0) <= seq), None)
+
+    def unexplained(seqs: list[int]) -> list[int]:
+        return [seq for seq in seqs if explained.get((seq, redacted[seq]), 0) <= seq]
+
+    missing = unexplained(list(redacted))
+    if missing and last_entry is not None:
+        beyond = select(DecisionLedgerEntry).where(
+            DecisionLedgerEntry.seq > last_entry.seq,
+            DecisionLedgerEntry.event_type == REDACTION_EVENT_TYPE,
+        )
+        for record in session.scalars(beyond):
+            _note_redaction(explained, record)
+        missing = unexplained(missing)
+    return missing[0] if missing else None

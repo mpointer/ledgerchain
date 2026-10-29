@@ -134,6 +134,14 @@ A `redaction` entry records the seq, the reason and who asked.
 any payload that was removed without that record. Deciding who may redact
 is your application's job.
 
+Only the payload can be erased. `actor`, `subject_uri`, `event_type`,
+`tenant_id` and the `reason` you pass are hashed into the chain and
+permanent, and a redaction entry cannot itself be redacted. Keep personal
+data out of all of them: use pseudonymous IDs for actors and subjects
+(`/claims/c-17`, not `/users/jane@example.com`) and a ticket number, not a
+name, as the reason. Personal data belongs in the payload, or behind an ID
+that resolves to a table you can delete from.
+
 The per-entry salt is what makes the erasure real. Without it, the
 `payload_sha256` left behind could be brute-forced back to a
 low-entropy payload such as a national ID number. Rows written before 0.3
