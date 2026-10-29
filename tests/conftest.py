@@ -91,14 +91,26 @@ class FakeClientError(Exception):
 class FakeS3:
     """In-memory stand-in for the boto3 S3 client slice ledgerchain uses.
 
-    Without ``IfNoneMatch`` a put replaces the object, which is what a
-    versioned bucket's ``get_object`` sees: the newest version wins.
+    Behaves like a versioned (Object Lock) bucket: every put adds a version,
+    ``get_object`` returns the latest unless ``VersionId`` is given, and
+    ``delete_object`` adds a delete marker. Nothing is ever really removed.
     """
 
     def __init__(self, *, fail: bool = False):
         self.fail = fail
-        self.objects: dict[tuple[str, str], bytes] = {}
+        # (bucket, key) -> [(version_id, body or None for a delete marker)]
+        self.history: dict[tuple[str, str], list[tuple[str, bytes | None]]] = {}
         self.put_calls: list[dict] = []
+        self._next_version = 0
+
+    @property
+    def objects(self) -> dict[tuple[str, str], bytes]:
+        """Current (latest, not deleted) body per key, as a plain listing sees it."""
+        return {k: v[-1][1] for k, v in self.history.items() if v[-1][1] is not None}
+
+    def _add(self, key, body):
+        self._next_version += 1
+        self.history.setdefault(key, []).append((f"v{self._next_version}", body))
 
     def put_object(self, **kwargs):
         self.put_calls.append(kwargs)
@@ -107,20 +119,32 @@ class FakeS3:
         key = (kwargs["Bucket"], kwargs["Key"])
         if kwargs.get("IfNoneMatch") == "*" and key in self.objects:
             raise FakeClientError("PreconditionFailed")
-        self.objects[key] = kwargs["Body"]
+        self._add(key, kwargs["Body"])
         return {"ETag": '"fake-etag"'}
+
+    def delete_object(self, **kwargs):
+        self._add((kwargs["Bucket"], kwargs["Key"]), None)
 
     def get_object(self, **kwargs):
         key = (kwargs["Bucket"], kwargs["Key"])
-        if key not in self.objects:
+        versions = self.history.get(key, [])
+        if "VersionId" in kwargs:
+            body = dict(versions).get(kwargs["VersionId"])
+        else:
+            body = versions[-1][1] if versions else None
+        if body is None:
             raise KeyError(f"NoSuchKey: {key}")
-        return {"Body": FakeBody(self.objects[key])}
+        return {"Body": FakeBody(body)}
 
-    def list_objects_v2(self, **kwargs):
-        keys = sorted(
-            k for b, k in self.objects if b == kwargs["Bucket"] and k.startswith(kwargs["Prefix"])
-        )
-        return {"Contents": [{"Key": k} for k in keys], "IsTruncated": False}
+    def list_object_versions(self, **kwargs):
+        listing: dict[str, list] = {"Versions": [], "DeleteMarkers": []}
+        for (bucket, key), versions in sorted(self.history.items()):
+            if bucket != kwargs["Bucket"] or not key.startswith(kwargs["Prefix"]):
+                continue
+            for order, (version_id, body) in enumerate(versions):
+                kind = "Versions" if body is not None else "DeleteMarkers"
+                listing[kind].append({"Key": key, "VersionId": version_id, "LastModified": order})
+        return {**listing, "IsTruncated": False}
 
     def stored_json(self, bucket: str, key: str) -> dict:
         return json.loads(self.objects[(bucket, key)])

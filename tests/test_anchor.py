@@ -245,3 +245,26 @@ def test_verify_anchor_uses_prev_checkpoint_root(db, s3, config):
     second.prev_checkpoint_root = "0" * 64
     db.commit()
     assert verify_anchor(second, config=config, client=s3).matched is False
+
+
+def test_commit_false_leaves_the_callers_transaction_alone(db, s3, config):
+    seed(db, 1)
+    cp = build_checkpoint(db).checkpoint
+    LedgerWriter.append(db, event_type="e", payload={"pending": 1}, actor={}, tenant_id="acme")
+
+    assert anchor_checkpoint(db, cp, config=config, client=s3, commit=False).ok
+    db.rollback()  # the caller decides: the unrelated append and the status both go
+    assert db.query(DecisionLedgerEntry).filter_by(event_type="e").count() == 0
+    db.refresh(cp)
+    assert cp.anchor_status == "pending"
+
+
+def test_failed_anchor_with_commit_false_does_not_roll_back(db, config):
+    seed(db, 1)
+    cp = build_checkpoint(db).checkpoint
+    LedgerWriter.append(db, event_type="e", payload={"pending": 1}, actor={}, tenant_id="acme")
+
+    result = anchor_checkpoint(db, cp, config=config, client=FakeS3(fail=True), commit=False)
+    assert result.ok is False and cp.anchor_status == "failed"
+    db.commit()
+    assert db.query(DecisionLedgerEntry).filter_by(event_type="e").count() == 1

@@ -25,7 +25,7 @@ from ledgerchain import (
     metadata,
     verify_chain,
 )
-from ledgerchain.models import DecisionLedgerEntry
+from ledgerchain.models import DecisionLedgerEntry, LedgerCheckpoint
 
 _URL = os.environ.get("LEDGERCHAIN_TEST_DATABASE_URL")
 
@@ -149,3 +149,17 @@ def test_concurrent_checkpoint_jobs_cover_disjoint_ranges(pg, monkeypatch):
     first, later = ranges
     assert first == (1, 4) and later[0] == first[1] + 1
     assert verify_chain(pg).valid
+
+
+def test_checkpoint_guard_trigger(pg):
+    _append(pg, {"x": 1})
+    cp = build_checkpoint(pg).checkpoint
+    table = LedgerCheckpoint.__table__
+    for stmt in (table.delete(), table.update().values(merkle_root="f" * 64)):
+        with pytest.raises(Exception, match="append-only"):
+            pg.execute(stmt)
+            pg.commit()
+        pg.rollback()
+    pg.execute(table.update().values(anchor_status="anchored", anchor_uri="s3://b/k"))
+    pg.commit()
+    assert pg.get(LedgerCheckpoint, cp.id).merkle_root == cp.merkle_root
