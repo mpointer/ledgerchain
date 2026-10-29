@@ -5,6 +5,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-29
+
+Security release with a schema change. The actor and subject of every new entry are
+now hashed, anchors are checked against their original version, and payloads can be
+redacted for erasure requests. Read Upgrading before deploying.
+
+### Upgrading
+
+- Add two columns before deploying. Existing rows become version 1, and
+  neither statement fires row triggers:
+  `ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1;`
+  `ALTER TABLE decision_ledger ADD COLUMN payload_salt CHAR(64);`
+  In Alembic, give `hash_version` a `server_default="1"`. Then re-run
+  `install_immutability`, which is idempotent. The new triggers reference
+  both columns and allow redaction.
+- `"redaction"` is a reserved event type, like `"genesis"` and
+  `"checkpoint"`. `LedgerWriter.append` rejects it.
+- `payload_digest(payload, salt)` is exported for auditors who recompute
+  `payload_sha256` outside the library.
+- `compute_entry_hash` takes `actor`, `subject_uri` and `hash_version`.
+  Its default is still `hash_version=1`. An auditor recomputing new rows
+  outside the library must pass the row's `hash_version` and use the v2
+  layout from the README.
+- `HASH_VERSION` is exported. `DecisionLedgerEntry.to_dict()` includes
+  `hash_version`.
+- Anchor verification lists object versions. The S3 client needs
+  `list_object_versions` and `get_object(VersionId=...)` instead of
+  `list_objects_v2`. On AWS, the verifying role needs
+  `s3:ListBucketVersions` and `s3:GetObjectVersion`.
+
 ### Added
 
 - `LedgerWriter.redact(session, seq, actor=, tenant_id=, reason=)` erases an
@@ -65,30 +95,6 @@ All notable changes to this project are documented here. The format follows
   every action is pinned to a commit SHA. Dependabot keeps the pins and
   dependencies current. The release workflow also checks formatting and
   runs the PostgreSQL tests against a service container.
-
-### Upgrading
-
-- Add two columns before deploying. Existing rows become version 1, and
-  neither statement fires row triggers:
-  `ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1;`
-  `ALTER TABLE decision_ledger ADD COLUMN payload_salt CHAR(64);`
-  In Alembic, give `hash_version` a `server_default="1"`. Then re-run
-  `install_immutability`, which is idempotent. The new triggers reference
-  both columns and allow redaction.
-- `"redaction"` is a reserved event type, like `"genesis"` and
-  `"checkpoint"`. `LedgerWriter.append` rejects it.
-- `payload_digest(payload, salt)` is exported for auditors who recompute
-  `payload_sha256` outside the library.
-- `compute_entry_hash` takes `actor`, `subject_uri` and `hash_version`.
-  Its default is still `hash_version=1`. An auditor recomputing new rows
-  outside the library must pass the row's `hash_version` and use the v2
-  layout from the README.
-- `HASH_VERSION` is exported. `DecisionLedgerEntry.to_dict()` includes
-  `hash_version`.
-- Anchor verification lists object versions. The S3 client needs
-  `list_object_versions` and `get_object(VersionId=...)` instead of
-  `list_objects_v2`. On AWS, the verifying role needs
-  `s3:ListBucketVersions` and `s3:GetObjectVersion`.
 
 ## [0.2.0] - 2026-10-29
 
