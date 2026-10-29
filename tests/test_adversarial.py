@@ -85,7 +85,6 @@ def test_reanchoring_a_forged_checkpoint_cannot_shadow_the_original(db, s3):
     assert verify_anchor(cp, config=CONFIG, client=s3).matched is False
 
 
-@pytest.mark.xfail(strict=True, reason="verify_chain does not check checkpoint chaining yet")
 def test_breaking_prev_checkpoint_root_is_detected(db):
     seed(db)
     build_checkpoint(db)
@@ -96,13 +95,27 @@ def test_breaking_prev_checkpoint_root_is_detected(db):
     assert verify_chain(db).valid is False
 
 
-@pytest.mark.xfail(strict=True, reason="checkpoint rows are not cross-checked against the chain")
 def test_deleting_checkpoint_rows_is_detected(db):
     seed(db)
     build_checkpoint(db)
     db.execute(LedgerCheckpoint.__table__.delete())
     db.commit()
     assert verify_chain(db).valid is False
+
+
+def test_checkpoint_row_disagreeing_with_its_entry_is_detected_in_a_partial_range(db):
+    """A partial range cannot see the first checkpoint's predecessor, so the
+    chaining check is blind there; the chain's own checkpoint entry is not."""
+    seed(db)
+    build_checkpoint(db)
+    seed(db, 2)
+    second = build_checkpoint(db).checkpoint
+    second.prev_checkpoint_root = "d" * 64
+    db.commit()
+
+    result = verify_chain(db, from_seq=second.from_seq)
+    assert result.valid is False
+    assert "disagrees with its entry" in result.reason
 
 
 def test_checkpoint_survives_an_append_committed_mid_build(tmp_path, monkeypatch):

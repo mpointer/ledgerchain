@@ -9,12 +9,14 @@ test may create and drop tables in. CI provides one.
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+import ledgerchain.checkpoint as checkpoint_module
 from ledgerchain import (
     LedgerWriter,
     build_checkpoint,
@@ -114,3 +116,36 @@ def test_superuser_rewrite_after_dropping_trigger_is_detected(pg):
     pg.commit()
     result = verify_chain(pg)
     assert result.valid is False and result.first_bad_seq == 2
+
+
+def test_concurrent_checkpoint_jobs_cover_disjoint_ranges(pg, monkeypatch):
+    """The second job must wait for the first and checkpoint only what came
+    after it. Without the head lock both covered [1, N] and forked the
+    checkpoint chain."""
+    for i in range(3):
+        _append(pg, {"i": i})
+    Session = sessionmaker(bind=pg.get_bind())
+    real_merkle_root = checkpoint_module.merkle_root
+    ranges = []
+
+    def run_job():
+        with Session() as session:
+            cp = build_checkpoint(session).checkpoint
+            ranges.append((cp.from_seq, cp.to_seq))
+
+    second = threading.Thread(target=run_job)
+
+    def start_second_job_mid_build(hashes):
+        checkpoint_module.merkle_root = real_merkle_root
+        second.start()
+        second.join(timeout=1)  # blocks on the head lock while this job holds it
+        return real_merkle_root(hashes)
+
+    monkeypatch.setattr(checkpoint_module, "merkle_root", start_second_job_mid_build)
+    run_job()
+    second.join(timeout=10)
+
+    assert not second.is_alive()
+    first, later = ranges
+    assert first == (1, 4) and later[0] == first[1] + 1
+    assert verify_chain(pg).valid

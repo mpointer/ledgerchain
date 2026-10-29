@@ -72,7 +72,11 @@ def build_checkpoint(
     to cover: an empty ledger, or a head that has not advanced past the
     last checkpoint.
     """
-    head = session.execute(select(LedgerHead)).scalar_one_or_none()
+    # Lock the head for the whole build: a second checkpoint job waits here
+    # and then sees this one's row, instead of covering the same range.
+    head = session.execute(
+        select(LedgerHead).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
     if head is None:
         return CheckpointResult(checkpoint=None, skipped_reason="ledger is empty (no genesis yet)")
 

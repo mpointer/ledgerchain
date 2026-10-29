@@ -26,8 +26,20 @@ All notable changes to this project are documented here. The format follows
   bucket configuration now fails instead of passing. The S3 client needs
   `list_objects_v2` in addition to `put_object` and `get_object`.
 
+- `verify_chain` now checks that checkpoints tile the ledger: each starts
+  right after the previous one and carries its root in
+  `prev_checkpoint_root`. Every `checkpoint` entry in the chain must also
+  have a `ledger_checkpoint` row that agrees with it. The table has no
+  immutability triggers, so the application role could previously delete or
+  edit checkpoint rows undetected. A ledger whose checkpoint chain already
+  forked (see the next item) now reports invalid, which is accurate.
+
 ### Fixed
 
+- `build_checkpoint` locks the head row for the whole build. Two concurrent
+  checkpoint jobs could both cover the same range and fork the checkpoint
+  chain. On SQLite, where `FOR UPDATE` is a no-op, the verifier now reports
+  such a fork.
 - `LedgerWriter.append` refreshes the locked head row instead of reusing a
   stale copy from the session's identity map. `build_checkpoint` failed with
   `IntegrityError` when another writer committed while it ran.
