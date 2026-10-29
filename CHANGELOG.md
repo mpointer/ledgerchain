@@ -34,6 +34,20 @@ All notable changes to this project are documented here. The format follows
   configured. It used to exit 0.
 - `verify_chain` streams rows instead of loading the whole ledger. Peak
   memory for 100k entries went from 295 MB to 6 MB; time is unchanged.
+- `create_all` raises `ValueError` on a dialect with no immutability
+  triggers (anything other than PostgreSQL and SQLite) instead of quietly
+  creating an unprotected ledger. Pass `immutable=False` to accept that.
+- `__version__` is read from the installed package metadata, so
+  `pyproject.toml` is the only place the version is set.
+
+### Changed
+
+- `rfc8785` is capped below 0.2. Every stored hash depends on its exact
+  output, so a new minor version should be adopted deliberately.
+- CI and release workflows run with read-only `contents` permission, and
+  every action is pinned to a commit SHA. Dependabot keeps the pins and
+  dependencies current. The release workflow also checks formatting and
+  runs the PostgreSQL tests against a service container.
 
 ### Upgrading
 

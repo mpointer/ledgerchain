@@ -28,7 +28,8 @@ classifiers = [
 ]
 dependencies = [
   "sqlalchemy>=2.0",
-  "rfc8785>=0.1.4",
+  # Every stored hash depends on its exact output: take new minors deliberately.
+  "rfc8785>=0.1.4,<0.2",
 ]
 
 [project.optional-dependencies]
