@@ -107,6 +107,10 @@ def test_unsupported_dialect_returns_false():
 
     assert install_immutability(FakeEngine()) is False  # type: ignore[arg-type]
     assert drop_immutability(FakeEngine()) is False  # type: ignore[arg-type]
+    # create_all refuses before creating any table, rather than leave the
+    # ledger up without its triggers.
+    with pytest.raises(ValueError, match="no immutability triggers for dialect 'oracle'"):
+        create_all(FakeEngine())  # type: ignore[arg-type]
 
 
 def test_checkpoint_rows_cannot_be_deleted_or_rewritten(immutable_db):

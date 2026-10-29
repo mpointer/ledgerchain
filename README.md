@@ -226,8 +226,13 @@ ruff check . && mypy && pytest
 ```
 
 The suite runs on in-memory and file-backed SQLite and needs no services.
-The PostgreSQL trigger SQL is the same text the origin application runs in
-CI against a real Postgres.
+The PostgreSQL tests run when `LEDGERCHAIN_TEST_DATABASE_URL` points at a
+database they may create schemas in; CI and the release workflow both
+provide one.
+
+Supported databases are PostgreSQL and SQLite. `create_all` refuses other
+dialects rather than create a ledger without its immutability triggers;
+MySQL does not accept the schema as is.
 
 ## Releasing
 

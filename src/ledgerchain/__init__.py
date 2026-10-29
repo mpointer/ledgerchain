@@ -5,6 +5,8 @@ recomputation, checkpoint it with Merkle roots, and anchor those roots to
 object storage as an independent witness.
 """
 
+from importlib.metadata import version as _dist_version
+
 from .anchor import (
     AnchorConfig,
     AnchorResult,
@@ -29,7 +31,7 @@ from .writer import (
     compute_entry_hash,
 )
 
-__version__ = "0.2.0"
+__version__ = _dist_version("ledgerchain")  # single source: pyproject.toml
 
 __all__ = [
     "AnchorConfig",

@@ -169,7 +169,17 @@ def create_all(engine: Engine, *, immutable: bool = True) -> None:
     normally go through the host's migration tool with
     ``ledgerchain.metadata`` added to ``target_metadata`` and
     :func:`install_immutability` called from the migration.
+
+    Raises ``ValueError`` before creating anything when ``immutable`` is set
+    and the dialect has no triggers here (only PostgreSQL and SQLite do), so
+    a ledger never silently comes up unprotected. Pass ``immutable=False``
+    to accept that.
     """
+    if immutable and _statements(engine.dialect.name, install=True) is None:
+        raise ValueError(
+            f"no immutability triggers for dialect {engine.dialect.name!r}; "
+            "ledgerchain supports PostgreSQL and SQLite (pass immutable=False to skip them)"
+        )
     metadata.create_all(engine)
     if immutable:
         install_immutability(engine)
