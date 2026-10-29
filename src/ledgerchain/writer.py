@@ -10,11 +10,12 @@ write failure propagates to the caller's transaction.
 from __future__ import annotations
 
 import hashlib
+import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import JSON, select, update
 from sqlalchemy.orm import Session
 
 from .canonical import canonicalize, sha256_hex
@@ -30,6 +31,11 @@ GENESIS_EVENT_TYPE = "genesis"
 CHECKPOINT_EVENT_TYPE = "checkpoint"
 """Reserved for entries written by :func:`ledgerchain.build_checkpoint`."""
 
+REDACTION_EVENT_TYPE = "redaction"
+"""Reserved for entries written by :meth:`LedgerWriter.redact`."""
+
+RESERVED_EVENT_TYPES = (GENESIS_EVENT_TYPE, CHECKPOINT_EVENT_TYPE, REDACTION_EVENT_TYPE)
+
 GENESIS_ACTOR: dict[str, Any] = {"kind": "system", "sub": "ledger-writer"}
 
 HASH_VERSION = 2
@@ -39,6 +45,18 @@ HASH_VERSION = 2
 def rfc3339_utc(ts: datetime) -> str:
     """``2026-10-18T12:00:00.123456Z`` form used inside the entry hash."""
     return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def payload_digest(payload: Mapping[str, Any], salt: str | None) -> str:
+    """``payload_sha256`` for a payload.
+
+    With a salt (hash version 2) it is ``sha256(RFC8785({"payload": payload,
+    "salt": salt}))``. Without one (version 1 rows) it is
+    ``sha256(RFC8785(payload))``.
+    """
+    if salt is None:
+        return sha256_hex(dict(payload))
+    return sha256_hex({"payload": dict(payload), "salt": salt})
 
 
 def compute_entry_hash(
@@ -110,9 +128,9 @@ class LedgerWriter:
         on a cold ledger, then inserts the requested entry chained onto the
         current head.
 
-        ``event_type`` is caller-defined, except ``"genesis"`` and
-        ``"checkpoint"``, which are reserved: the verifier trusts every
-        ``checkpoint`` entry as the record of a checkpoint row.
+        ``event_type`` is caller-defined, except ``"genesis"``,
+        ``"checkpoint"`` and ``"redaction"``, which are reserved: the
+        verifier trusts those entries as records of what ledgerchain did.
         ``payload`` and ``actor`` must be JSON-serializable per
         RFC 8785; a ``set`` or a non-string key raises
         :class:`ledgerchain.CanonicalizationError` before anything is
@@ -121,7 +139,7 @@ class LedgerWriter:
         Returns the flushed, not committed, entry so callers can read the
         assigned ``seq`` and ``entry_hash`` immediately.
         """
-        if event_type in (GENESIS_EVENT_TYPE, CHECKPOINT_EVENT_TYPE):
+        if event_type in RESERVED_EVENT_TYPES:
             raise ValueError(f"event_type {event_type!r} is reserved for ledgerchain")
         return _append(
             session,
@@ -131,6 +149,62 @@ class LedgerWriter:
             tenant_id=tenant_id,
             subject_uri=subject_uri,
             ts=ts,
+        )
+
+    @staticmethod
+    def redact(
+        session: Session,
+        seq: int,
+        *,
+        actor: Mapping[str, Any],
+        tenant_id: str,
+        reason: str,
+    ) -> DecisionLedgerEntry:
+        """Erase entry ``seq``'s payload for good, keeping the chain intact.
+
+        Sets the payload to JSON null and deletes its salt; every hashed
+        column stays as it was, so ``entry_hash``, checkpoints and anchors
+        still verify. Then appends a ``redaction`` entry recording ``seq``,
+        ``reason`` and ``actor``, so the erasure is itself on the record.
+        ``tenant_id`` must be the entry's own tenant.
+        ``verify_chain`` reports redacted seqs and fails on a payload that
+        was removed without such an entry.
+
+        Only the payload is erased. ``actor``, ``subject_uri``,
+        ``event_type``, ``tenant_id`` and this call's ``reason`` are hashed
+        and permanent, and the redaction entry itself cannot be redacted, so
+        keep personal data out of all of them.
+
+        Runs inside the caller's transaction and never commits, like
+        :meth:`append`. Deciding who may redact is the caller's job.
+        Version 1 rows have no salt: their remaining ``payload_sha256`` is a
+        plain hash and a guessable payload could be recovered from it.
+        """
+        # Locked and re-read: a copy cached in this session could miss a
+        # redaction another session just committed.
+        entry = session.get(DecisionLedgerEntry, seq, populate_existing=True, with_for_update=True)
+        if entry is None:
+            raise LookupError(f"no ledger entry at seq={seq}")
+        # seq is global across tenants: a caller authorized for one tenant
+        # must not erase another's entry with it.
+        if entry.tenant_id != tenant_id:
+            raise PermissionError(f"entry seq={seq} does not belong to tenant {tenant_id!r}")
+        if entry.event_type in RESERVED_EVENT_TYPES:
+            raise ValueError(f"{entry.event_type!r} entries cannot be redacted")
+        if entry.payload is None:
+            raise ValueError(f"entry seq={seq} is already redacted")
+        session.execute(
+            update(DecisionLedgerEntry)
+            .where(DecisionLedgerEntry.seq == seq)
+            .values(payload=JSON.NULL, payload_salt=None)
+        )
+        session.expire(entry, ["payload", "payload_salt"])
+        return _append(
+            session,
+            event_type=REDACTION_EVENT_TYPE,
+            payload={"seq": seq, "reason": reason},
+            actor=actor,
+            tenant_id=tenant_id,
         )
 
 
@@ -192,7 +266,8 @@ def _build_entry(
         raise TypeError("actor must be a JSON object (mapping), got " + type(actor).__name__)
     payload_dict = dict(payload)
     actor_dict = dict(actor)
-    payload_sha256 = sha256_hex(payload_dict)
+    salt = secrets.token_hex(32)
+    payload_sha256 = payload_digest(payload_dict, salt)
     entry_hash = compute_entry_hash(
         prev_hash=prev_hash,
         payload_sha256=payload_sha256,
@@ -213,6 +288,7 @@ def _build_entry(
         actor=actor_dict,
         subject_uri=subject_uri,
         payload=payload_dict,
+        payload_salt=salt,
         payload_sha256=payload_sha256,
         prev_hash=prev_hash,
         entry_hash=entry_hash,

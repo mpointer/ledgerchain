@@ -1,12 +1,14 @@
 """Database-level immutability for ``decision_ledger`` and ``ledger_checkpoint``.
 
-On ``decision_ledger`` a BEFORE UPDATE/DELETE trigger raises
-unconditionally: the ledger has no legitimate update or delete path. On
-``ledger_checkpoint`` deletes are refused and updates may only touch
+On ``decision_ledger`` a BEFORE UPDATE/DELETE trigger raises on everything
+except a redaction: the payload set to JSON null with its salt erased and
+every hashed column unchanged (see :meth:`ledgerchain.LedgerWriter.redact`).
+On ``ledger_checkpoint`` deletes are refused and updates may only touch
 ``anchor_status`` and ``anchor_uri``, which anchoring has to write. This is
 defense in depth against application bugs and against anyone holding only
-the application's database role. It is not a defense against a superuser, who can drop the
-trigger. That case is what :mod:`ledgerchain.anchor` exists for.
+the application's database role. It is not a defense against a superuser,
+who can drop the triggers. That case is what :mod:`ledgerchain.anchor`
+exists for.
 
 Supported dialects: PostgreSQL and SQLite. Other dialects are left alone
 and :func:`install_immutability` returns ``False`` so callers can decide
@@ -23,6 +25,20 @@ PG_INSTALL_SQL = [
     """
     CREATE OR REPLACE FUNCTION decision_ledger_immutable() RETURNS trigger AS $$
     BEGIN
+      -- The one permitted update is a redaction: the payload becomes JSON
+      -- null, its salt is erased, and every hashed column stays as it was.
+      IF TG_OP = 'UPDATE' THEN
+        IF NEW.payload = 'null'::jsonb AND OLD.payload <> 'null'::jsonb
+           AND NEW.payload_salt IS NULL
+           AND (NEW.seq, NEW.hash_version, NEW.tenant_id, NEW.ts, NEW.event_type, NEW.actor,
+                NEW.subject_uri, NEW.payload_sha256, NEW.prev_hash, NEW.entry_hash)
+               IS NOT DISTINCT FROM
+               (OLD.seq, OLD.hash_version, OLD.tenant_id, OLD.ts, OLD.event_type, OLD.actor,
+                OLD.subject_uri, OLD.payload_sha256, OLD.prev_hash, OLD.entry_hash)
+        THEN
+          RETURN NEW;
+        END IF;
+      END IF;
       RAISE EXCEPTION 'decision_ledger is append-only: % not permitted (seq=%)', TG_OP, OLD.seq;
     END;
     $$ LANGUAGE plpgsql;
@@ -78,6 +94,16 @@ SQLITE_INSTALL_SQL = [
     """
     CREATE TRIGGER trg_decision_ledger_no_update
     BEFORE UPDATE ON decision_ledger
+    WHEN NOT (
+      -- The one permitted update is a redaction: payload to JSON null, salt
+      -- erased, every hashed column unchanged.
+      NEW.payload = 'null' AND OLD.payload <> 'null' AND NEW.payload_salt IS NULL
+      AND NEW.seq IS OLD.seq AND NEW.hash_version IS OLD.hash_version
+      AND NEW.tenant_id IS OLD.tenant_id AND NEW.ts IS OLD.ts
+      AND NEW.event_type IS OLD.event_type AND NEW.actor IS OLD.actor
+      AND NEW.subject_uri IS OLD.subject_uri AND NEW.payload_sha256 IS OLD.payload_sha256
+      AND NEW.prev_hash IS OLD.prev_hash AND NEW.entry_hash IS OLD.entry_hash
+    )
     BEGIN
       SELECT RAISE(ABORT, 'decision_ledger is append-only: UPDATE not permitted');
     END;

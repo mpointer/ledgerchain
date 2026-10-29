@@ -17,13 +17,32 @@ from ledgerchain import (
     LedgerWriter,
     compute_entry_hash,
     create_all,
+    install_immutability,
     sha256_hex,
     verify_chain,
 )
 from ledgerchain.models import DecisionLedgerEntry, JSONType, LedgerHead, UTCDateTime
 
-UPGRADE_SQL = "ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1"
-"""The documented upgrade step from 0.2.x (see CHANGELOG)."""
+UPGRADE_SQL = [
+    "ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1",
+    "ALTER TABLE decision_ledger ADD COLUMN payload_salt CHAR(64)",
+]
+"""The documented upgrade from 0.2.x (see CHANGELOG), before re-running
+install_immutability."""
+
+_LEGACY_TRIGGERS = {
+    # 0.2.x's unconditional append-only triggers, which reference no new column.
+    "postgresql": [
+        "CREATE OR REPLACE FUNCTION decision_ledger_immutable() RETURNS trigger AS $$"
+        " BEGIN RAISE EXCEPTION 'decision_ledger is append-only'; END; $$ LANGUAGE plpgsql",
+        "CREATE TRIGGER trg_decision_ledger_no_update BEFORE UPDATE ON decision_ledger"
+        " FOR EACH ROW EXECUTE FUNCTION decision_ledger_immutable()",
+    ],
+    "sqlite": [
+        "CREATE TRIGGER trg_decision_ledger_no_update BEFORE UPDATE ON decision_ledger"
+        " BEGIN SELECT RAISE(ABORT, 'decision_ledger is append-only'); END",
+    ],
+}
 
 _PG_URL = os.environ.get("LEDGERCHAIN_TEST_DATABASE_URL")
 
@@ -39,10 +58,14 @@ _INSERT_V1 = text(
 
 
 def _legacy_ledger(engine, n=3):
-    """A 0.2.x-shaped ledger: no hash_version column, v1 hashes, triggers on."""
-    create_all(engine, immutable=True)
+    """A 0.2.x-shaped ledger: no hash_version or payload_salt column, v1
+    hashes, and 0.2.x's append-only trigger on."""
+    create_all(engine, immutable=False)
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE decision_ledger DROP COLUMN hash_version"))
+        conn.execute(text("ALTER TABLE decision_ledger DROP COLUMN payload_salt"))
+        for stmt in _LEGACY_TRIGGERS[engine.dialect.name]:
+            conn.execute(text(stmt))
         prev = GENESIS_PREV_HASH
         for seq in range(1, n + 1):
             row = {
@@ -71,8 +94,10 @@ def _legacy_ledger(engine, n=3):
 
 def _upgrade_then_append_and_verify(engine):
     _legacy_ledger(engine)
-    with engine.begin() as conn:
-        conn.execute(text(UPGRADE_SQL))
+    with engine.begin() as conn:  # the ALTERs must not trip the legacy row trigger
+        for stmt in UPGRADE_SQL:
+            conn.execute(text(stmt))
+    install_immutability(engine)
     Session = sessionmaker(bind=engine)
     with Session() as session:
         assert verify_chain(session).valid

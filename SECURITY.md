@@ -9,6 +9,12 @@
   first bad sequence number.
 - The immutability triggers stop the application database role from
   updating or deleting ledger rows, including through application bugs.
+  The one exception is a redaction, which erases a payload and must be
+  recorded by a `redaction` entry, or `verify_chain` fails. That entry
+  names the actor who asked. Deciding who may redact is the application's
+  job. Only payload content can be erased: `actor`, `subject_uri`,
+  `event_type`, `tenant_id` and the redaction reason are permanent, so keep
+  personal data out of them.
 - A fully privileged database administrator can drop the triggers and
   rewrite the whole chain consistently. That is what checkpoint anchoring
   is for: a Merkle root written to object storage under Object Lock is an

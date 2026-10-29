@@ -49,7 +49,7 @@ def test_genesis_only_created_once(db):
     assert len(rows) == 1
 
 
-@pytest.mark.parametrize("event_type", ["genesis", "checkpoint"])
+@pytest.mark.parametrize("event_type", ["genesis", "checkpoint", "redaction"])
 def test_reserved_event_types_are_rejected(db, event_type):
     # verify_chain treats every checkpoint entry as the record of a checkpoint
     # row, so a caller-written one would poison verification.
@@ -66,12 +66,25 @@ def test_seq_is_global_not_per_tenant(db):
     assert e2.prev_hash == e1.entry_hash
 
 
-def test_payload_sha256_is_canonical_json_hash(db):
+def test_payload_sha256_is_a_salted_canonical_json_hash(db):
     entry = LedgerWriter.append(
         db, event_type="e", payload={"b": 1, "a": 2}, actor={}, tenant_id="acme"
     )
     db.commit()
-    assert entry.payload_sha256 == sha256_hex({"a": 2, "b": 1})
+    assert len(entry.payload_salt) == 64
+    expected = rfc8785.dumps({"payload": {"a": 2, "b": 1}, "salt": entry.payload_salt})
+    assert entry.payload_sha256 == hashlib.sha256(expected).hexdigest()
+
+
+def test_equal_payloads_get_different_commitments(db):
+    # Without the salt a low-entropy payload could be guessed from its hash
+    # even after its content is redacted.
+    a, b = (
+        LedgerWriter.append(db, event_type="e", payload={"ok": True}, actor={}, tenant_id="t")
+        for _ in range(2)
+    )
+    assert a.payload_sha256 != b.payload_sha256
+    assert a.payload_sha256 != sha256_hex({"ok": True})
 
 
 def test_entry_hash_matches_the_documented_formula(db):
