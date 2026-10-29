@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ledgerchain"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hash-chained, tamper-evident decision ledger on SQLAlchemy: append-only rows, Merkle checkpoints, external anchoring, and a verifier that recomputes everything."
 readme = "README.md"
 requires-python = ">=3.10"

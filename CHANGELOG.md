@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+Security release. Upgrade if you rely on anchoring or checkpoints.
+
+### Upgrading
+
+- Verification is stricter, so a ledger that passed under 0.1.0 can now
+  report invalid. This happens if its checkpoint chain forked through
+  concurrent checkpoint jobs, if checkpoint rows were edited or deleted, or
+  if the application appended its own `"checkpoint"` events. Those are real
+  problems that 0.1.0 missed.
+- Run `verify --check-anchors` and `verify_anchors` with the same bucket
+  and prefix the anchors were written with. A missing bucket configuration
+  now fails instead of passing.
+- The `s3` extra needs `boto3>=1.35.2`. Injected clients need
+  `list_objects_v2` as well as `put_object` and `get_object`.
+- `LedgerWriter.append(event_type="checkpoint")` now raises.
+
 ### Security
 
 - `verify_anchor` now locates the anchored object from its `AnchorConfig`
