@@ -28,6 +28,7 @@ do is in [docs/why-ledgerchain.md](docs/why-ledgerchain.md).
 | Threat | Mechanism | Detected by |
 |---|---|---|
 | A payload is edited in place | `payload_sha256` over RFC 8785 canonical JSON | `verify_chain` names the seq |
+| The actor or subject is rewritten | both are inside `entry_hash` (hash version 2) | `verify_chain` names the seq |
 | A row is deleted or reordered | strictly contiguous `seq`, each `entry_hash` includes `str(seq)` | `verify_chain` names the seq after the gap |
 | The head pointer is forged | `ledger_head` compared against the last recomputed hash | `verify_chain(head_valid=False)` |
 | A checkpoint row is rewritten | Merkle root recomputed over the entries it covers | `verify_chain` marks `root_valid=False` |
@@ -91,7 +92,8 @@ $ echo $?
 
 ```
 payload_sha256 = sha256( RFC8785(payload) )
-entry_hash     = sha256( prev_hash \n payload_sha256 \n seq \n event_type \n ts_rfc3339_utc \n tenant_id )
+entry_hash     = sha256( RFC8785([ "ledgerchain/v2", prev_hash, payload_sha256, seq,
+                                   event_type, ts_rfc3339_utc, tenant_id, actor, subject_uri ]) )
 ```
 
 - `seq` is assigned by the writer under a `SELECT ... FOR UPDATE` on the
@@ -100,6 +102,10 @@ entry_hash     = sha256( prev_hash \n payload_sha256 \n seq \n event_type \n ts_
 - The genesis entry (`seq=1`, `event_type="genesis"`) chains from
   `"0" * 64`. The writer creates it lazily on the first append.
 - Every digest is a full 64-hex string. Nothing is truncated anywhere.
+- Each row records its `hash_version`. Rows written by 0.1 and 0.2 are
+  version 1, which joined fields with newlines and did not cover `actor`
+  or `subject_uri`. They still verify, and the version can only move
+  forward along the chain, so a row cannot be rewritten back to version 1.
 - `event_type` is yours to define. Only `"genesis"` is reserved;
   `"checkpoint"` is what `build_checkpoint` writes.
 
@@ -170,6 +176,13 @@ def upgrade():
 ```
 
 Table names are `decision_ledger`, `ledger_head`, `ledger_checkpoint`.
+
+Upgrading from 0.2.x adds one column. Existing rows default to hash
+version 1, and the statement fires no row triggers:
+
+```sql
+ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1;
+```
 
 **Writes.** Call `LedgerWriter.append` inside the same session and
 transaction as the state change you are recording, then commit once. If

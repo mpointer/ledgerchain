@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Entry hash version 2 covers `actor` and `subject_uri`. Version 1 hashed
+  neither, so whoever could write the database could change who made a
+  decision, or what it was about, without breaking any hash, checkpoint, or
+  anchor. Version 2 hashes the fields as an RFC 8785 JSON array. The old
+  newline-joined form was also ambiguous: a newline inside `event_type` or
+  `tenant_id` could shift content between fields without changing the hash.
+- Each row records `hash_version`. The writer stamps 2. Version 1 rows keep
+  verifying, and `verify_chain` rejects a version lower than the one before
+  it, so a v2 row cannot be quietly rewritten as v1.
+
+### Upgrading
+
+- Add the column before deploying. Existing rows become version 1, and the
+  statement fires no row triggers:
+  `ALTER TABLE decision_ledger ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1;`
+  In Alembic, add the column with `server_default="1"`.
+- `compute_entry_hash` takes `actor`, `subject_uri` and `hash_version`.
+  Its default is still `hash_version=1`. An auditor recomputing new rows
+  outside the library must pass the row's `hash_version` and use the v2
+  layout from the README.
+- `HASH_VERSION` is exported. `DecisionLedgerEntry.to_dict()` includes
+  `hash_version`.
+
 ## [0.2.0] - 2026-10-29
 
 Security release. Upgrade if you rely on anchoring or checkpoints.

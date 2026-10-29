@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 
 import pytest
+import rfc8785
 from sqlalchemy import select
 
 from ledgerchain import (
     GENESIS_PREV_HASH,
+    HASH_VERSION,
     CanonicalizationError,
     LedgerWriter,
     compute_entry_hash,
@@ -72,18 +75,31 @@ def test_payload_sha256_is_canonical_json_hash(db):
 
 
 def test_entry_hash_matches_the_documented_formula(db):
-    entry = LedgerWriter.append(db, event_type="e", payload={"x": 1}, actor={}, tenant_id="acme")
-    db.commit()
-    expected = compute_entry_hash(
-        prev_hash=entry.prev_hash,
-        payload_sha256=entry.payload_sha256,
-        seq=entry.seq,
-        event_type=entry.event_type,
-        ts=entry.ts,
-        tenant_id=entry.tenant_id,
+    # Recomputed from the README formula with hashlib and rfc8785 directly,
+    # not through compute_entry_hash, so the docs and the code cannot drift.
+    entry = LedgerWriter.append(
+        db,
+        event_type="e",
+        payload={"x": 1},
+        actor={"kind": "human", "sub": "u1"},
+        tenant_id="acme",
+        subject_uri="/claims/c1",
     )
-    assert entry.entry_hash == expected
-    assert len(entry.entry_hash) == 64
+    db.commit()
+    ts = entry.ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    fields = [
+        "ledgerchain/v2",
+        entry.prev_hash,
+        entry.payload_sha256,
+        entry.seq,
+        "e",
+        ts,
+        "acme",
+        {"kind": "human", "sub": "u1"},
+        "/claims/c1",
+    ]
+    assert entry.hash_version == HASH_VERSION == 2
+    assert entry.entry_hash == hashlib.sha256(rfc8785.dumps(fields)).hexdigest()
 
 
 def test_head_row_tracks_the_latest_entry(db):
@@ -182,3 +198,15 @@ def test_hash_format_is_frozen():
         tenant_id="acme",
     )
     assert entry_hash == "a78122020eff42b15708b45245a867c5edc628a6ead54f4e2cde64c4a82828b5"
+    entry_hash_v2 = compute_entry_hash(
+        prev_hash=GENESIS_PREV_HASH,
+        payload_sha256=payload_sha256,
+        seq=2,
+        event_type="hitl.approval",
+        ts=datetime(2026, 10, 18, 12, 0, 0, 123456, tzinfo=timezone.utc),
+        tenant_id="acme",
+        actor={"kind": "human", "sub": "reviewer-42", "roles": ["approver"]},
+        subject_uri="/claims/c-17",
+        hash_version=2,
+    )
+    assert entry_hash_v2 == "09c4b2196601b601b0490ddc796587df0419d3773cda948ce79075127f151035"

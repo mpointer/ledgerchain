@@ -79,6 +79,9 @@ def verify_chain(
     """
     start_seq = 1 if from_seq is None or from_seq <= 1 else from_seq
     expected_prev = GENESIS_PREV_HASH
+    # Versions never go backwards: rewriting a v2 row as v1 would drop actor
+    # and subject_uri from the hash.
+    min_version = 1
 
     if start_seq > 1:
         anchor = session.get(DecisionLedgerEntry, start_seq - 1)
@@ -90,6 +93,7 @@ def verify_chain(
                 reason=f"no entry at seq={start_seq - 1} to anchor the range start",
             )
         expected_prev = anchor.entry_hash
+        min_version = anchor.hash_version
 
     query = select(DecisionLedgerEntry).where(DecisionLedgerEntry.seq >= start_seq)
     if to_seq is not None:
@@ -127,6 +131,14 @@ def verify_chain(
                 first_bad_seq=entry.seq,
                 reason="prev_hash does not chain from the prior entry",
             )
+        if entry.hash_version not in (1, 2) or entry.hash_version < min_version:
+            return VerifyResult(
+                valid=False,
+                checked_entries=checked,
+                first_bad_seq=entry.seq,
+                reason=f"hash_version {entry.hash_version} is unknown or older than {min_version}",
+            )
+        min_version = entry.hash_version
         recomputed = compute_entry_hash(
             prev_hash=entry.prev_hash,
             payload_sha256=entry.payload_sha256,
@@ -134,6 +146,9 @@ def verify_chain(
             event_type=entry.event_type,
             ts=entry.ts,
             tenant_id=entry.tenant_id,
+            actor=entry.actor,
+            subject_uri=entry.subject_uri,
+            hash_version=entry.hash_version,
         )
         if recomputed != entry.entry_hash:
             return VerifyResult(
