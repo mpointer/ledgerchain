@@ -23,6 +23,7 @@ from ledgerchain import (
     create_all,
     merkle_root,
     verify_anchor,
+    verify_anchors,
     verify_chain,
 )
 from ledgerchain.anchor import anchor_key
@@ -55,7 +56,7 @@ def test_repointing_anchor_uri_at_another_bucket_is_ignored(db, s3):
     original = s3.stored_json("real-bucket", anchor_key(CONFIG, cp))
 
     forged = dict(original, merkle_root="f" * 64)
-    s3.objects[("evil-bucket", "x.json")] = json.dumps(forged).encode()
+    s3.put_object(Bucket="evil-bucket", Key="x.json", Body=json.dumps(forged).encode())
     cp.merkle_root = "f" * 64
     cp.anchor_uri = "s3://evil-bucket/x.json"
     db.commit()
@@ -189,11 +190,13 @@ class TestCliCheckAnchors:
         seed(session)
         cp = build_checkpoint(session).checkpoint
         assert anchor_checkpoint(session, cp, config=CONFIG, client=s3).ok
+        key = anchor_key(CONFIG, cp)
         session.close()
-        s3.objects.clear()
+        s3.delete_object(Bucket="real-bucket", Key=key)
 
         code, body = self._verify(url, capsys)
-        assert code == 1 and "no anchor" in body["anchors"][0]["error"]
+        assert code == 1
+        assert any("deleted" in (r.get("error") or "") for r in body["anchors"])
 
     def test_merging_anchored_checkpoints_into_a_fresh_one_is_detected(self, url, s3, capsys):
         """A consistent rewrite replaces the anchored rows with one new, never
@@ -231,3 +234,50 @@ class TestCliCheckAnchors:
 
         code, body = self._verify(url, capsys)
         assert code == 1 and "not configured" in body["anchors"][0]["error"]
+
+
+class TestAnchorVersions:
+    """Object Lock keeps every version but cannot stop a new version or a
+    delete marker. Only the oldest version is the witness."""
+
+    def _anchored(self, db, s3):
+        seed(db)
+        cp = build_checkpoint(db).checkpoint
+        assert anchor_checkpoint(db, cp, config=CONFIG, client=s3).ok
+        return cp
+
+    def test_shadowing_an_anchor_with_a_newer_version_is_detected(self, db, s3):
+        cp = self._anchored(db, s3)
+        original = s3.stored_json("real-bucket", anchor_key(CONFIG, cp))
+        forged = dict(original, merkle_root="f" * 64)
+        # Someone holding the app's S3 credentials skips IfNoneMatch.
+        s3.put_object(
+            Bucket="real-bucket", Key=anchor_key(CONFIG, cp), Body=json.dumps(forged).encode()
+        )
+        cp.merkle_root = "f" * 64
+        db.commit()
+
+        assert verify_anchor(cp, config=CONFIG, client=s3).ok  # latest version agrees...
+        ok, reports = verify_anchors([cp], config=CONFIG, client=s3)
+        assert ok is False  # ...but the original does not, and the key was rewritten
+        errors = {r.get("error") for r in reports}
+        assert "anchor was overwritten or deleted after writing" in errors
+        row = next(r for r in reports if r.get("id") == cp.id)
+        assert row["matched"] is False
+
+    def test_hiding_an_anchor_behind_a_delete_marker_is_detected(self, db, s3):
+        cp = self._anchored(db, s3)
+        s3.delete_object(Bucket="real-bucket", Key=anchor_key(CONFIG, cp))
+        cp.anchor_status = "pending"  # so a missing object would look "not yet anchored"
+        db.commit()
+
+        ok, reports = verify_anchors([cp], config=CONFIG, client=s3)
+        assert ok is False
+        assert any(
+            r.get("error") == "anchor was overwritten or deleted after writing" for r in reports
+        )
+
+    def test_untouched_anchor_verifies_against_its_only_version(self, db, s3):
+        cp = self._anchored(db, s3)
+        ok, reports = verify_anchors([cp], config=CONFIG, client=s3)
+        assert ok and reports[0]["matched"] is True

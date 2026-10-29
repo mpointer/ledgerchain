@@ -99,69 +99,75 @@ def verify_chain(
     if to_seq is not None:
         query = query.where(DecisionLedgerEntry.seq <= to_seq)
     query = query.order_by(DecisionLedgerEntry.seq.asc())
-    entries = session.execute(query).scalars().all()
+    # Streamed in batches: memory stays flat however long the ledger is.
+    entries = session.execute(query.execution_options(yield_per=1000)).scalars()
 
     expected_seq = start_seq
     checked = 0
     last_entry: DecisionLedgerEntry | None = None
     checkpoint_entries: list[DecisionLedgerEntry] = []
-    for entry in entries:
-        checked += 1
-        if entry.seq != expected_seq:
-            return VerifyResult(
-                valid=False,
-                checked_entries=checked,
-                first_bad_seq=entry.seq,
-                reason=(
-                    f"seq gap: expected {expected_seq}, found {entry.seq} "
-                    "(row deleted or reordered)"
-                ),
+    try:
+        for entry in entries:
+            checked += 1
+            if entry.seq != expected_seq:
+                return VerifyResult(
+                    valid=False,
+                    checked_entries=checked,
+                    first_bad_seq=entry.seq,
+                    reason=(
+                        f"seq gap: expected {expected_seq}, found {entry.seq} "
+                        "(row deleted or reordered)"
+                    ),
+                )
+            if sha256_hex(entry.payload) != entry.payload_sha256:
+                return VerifyResult(
+                    valid=False,
+                    checked_entries=checked,
+                    first_bad_seq=entry.seq,
+                    reason="payload_sha256 mismatch: payload was modified",
+                )
+            if entry.prev_hash != expected_prev:
+                return VerifyResult(
+                    valid=False,
+                    checked_entries=checked,
+                    first_bad_seq=entry.seq,
+                    reason="prev_hash does not chain from the prior entry",
+                )
+            if entry.hash_version not in (1, 2) or entry.hash_version < min_version:
+                return VerifyResult(
+                    valid=False,
+                    checked_entries=checked,
+                    first_bad_seq=entry.seq,
+                    reason=(
+                        f"hash_version {entry.hash_version} is unknown or older than {min_version}"
+                    ),
+                )
+            min_version = entry.hash_version
+            recomputed = compute_entry_hash(
+                prev_hash=entry.prev_hash,
+                payload_sha256=entry.payload_sha256,
+                seq=entry.seq,
+                event_type=entry.event_type,
+                ts=entry.ts,
+                tenant_id=entry.tenant_id,
+                actor=entry.actor,
+                subject_uri=entry.subject_uri,
+                hash_version=entry.hash_version,
             )
-        if sha256_hex(entry.payload) != entry.payload_sha256:
-            return VerifyResult(
-                valid=False,
-                checked_entries=checked,
-                first_bad_seq=entry.seq,
-                reason="payload_sha256 mismatch: payload was modified",
-            )
-        if entry.prev_hash != expected_prev:
-            return VerifyResult(
-                valid=False,
-                checked_entries=checked,
-                first_bad_seq=entry.seq,
-                reason="prev_hash does not chain from the prior entry",
-            )
-        if entry.hash_version not in (1, 2) or entry.hash_version < min_version:
-            return VerifyResult(
-                valid=False,
-                checked_entries=checked,
-                first_bad_seq=entry.seq,
-                reason=f"hash_version {entry.hash_version} is unknown or older than {min_version}",
-            )
-        min_version = entry.hash_version
-        recomputed = compute_entry_hash(
-            prev_hash=entry.prev_hash,
-            payload_sha256=entry.payload_sha256,
-            seq=entry.seq,
-            event_type=entry.event_type,
-            ts=entry.ts,
-            tenant_id=entry.tenant_id,
-            actor=entry.actor,
-            subject_uri=entry.subject_uri,
-            hash_version=entry.hash_version,
-        )
-        if recomputed != entry.entry_hash:
-            return VerifyResult(
-                valid=False,
-                checked_entries=checked,
-                first_bad_seq=entry.seq,
-                reason="entry_hash does not match recomputed hash: row was tampered",
-            )
-        expected_prev = entry.entry_hash
-        expected_seq += 1
-        last_entry = entry
-        if entry.event_type == CHECKPOINT_EVENT_TYPE:
-            checkpoint_entries.append(entry)
+            if recomputed != entry.entry_hash:
+                return VerifyResult(
+                    valid=False,
+                    checked_entries=checked,
+                    first_bad_seq=entry.seq,
+                    reason="entry_hash does not match recomputed hash: row was tampered",
+                )
+            expected_prev = entry.entry_hash
+            expected_seq += 1
+            last_entry = entry
+            if entry.event_type == CHECKPOINT_EVENT_TYPE:
+                checkpoint_entries.append(entry)
+    finally:
+        entries.close()
 
     head_valid = True
     head = session.execute(select(LedgerHead)).scalar_one_or_none()

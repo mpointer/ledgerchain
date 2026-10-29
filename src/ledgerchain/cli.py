@@ -92,7 +92,8 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         session.close()
         engine.dispose()
     _emit(body)
-    return 0
+    # Asking for --anchor and not getting one (failed or unconfigured) is a failure.
+    return 0 if "anchor" not in body or body["anchor"]["ok"] else 1
 
 
 def cmd_anchor(args: argparse.Namespace) -> int:

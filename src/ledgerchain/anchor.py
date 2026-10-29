@@ -24,10 +24,10 @@ read from the environment:
     Object Lock, for buckets that do not have it enabled.
 
 The S3 client is injectable. Anything with ``put_object(**kwargs)``,
-``get_object(Bucket=..., Key=...)`` and ``list_objects_v2(**kwargs)``
-works, which keeps the test suite free of network access and credentials.
-``boto3`` is only imported when no client is supplied (install the ``s3``
-extra).
+``get_object(Bucket=..., Key=..., VersionId=...)`` and
+``list_object_versions(**kwargs)`` works, which keeps the test suite free
+of network access and credentials. ``boto3`` is only imported when no
+client is supplied (install the ``s3`` extra).
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ class ObjectStore(Protocol):
 
     def get_object(self, **kwargs: Any) -> Any: ...
 
-    def list_objects_v2(self, **kwargs: Any) -> Any: ...
+    def list_object_versions(self, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -124,19 +124,49 @@ def anchor_key(config: AnchorConfig, checkpoint: LedgerCheckpoint) -> str:
 _ANCHOR_NAME = re.compile(r"(\d{20})-(\d{20})\.json")
 
 
-def anchored_ranges(config: AnchorConfig, client: ObjectStore) -> list[tuple[int, int]]:
-    """Every ``(from_seq, to_seq)`` anchored under ``config.prefix``, read from the bucket."""
-    ranges: list[tuple[int, int]] = []
+def anchor_versions(
+    config: AnchorConfig, client: ObjectStore
+) -> dict[tuple[int, int], dict[str, Any]]:
+    """Every anchored ``(from_seq, to_seq)`` under ``config.prefix``, from the
+    bucket's version listing.
+
+    Each value holds ``version_id``, the oldest version and so the original
+    witness, and ``rewritten``. ``rewritten`` is set when the key has more
+    than one version or a delete marker. Anchors are written once, so either
+    means someone with write access to the bucket overwrote or hid one;
+    Object Lock keeps versions but does not stop either. Listing versions
+    rather than objects also sees anchors hidden behind a delete marker.
+    """
+    found: dict[tuple[int, int], dict[str, Any]] = {}
     kwargs: dict[str, Any] = {"Bucket": config.bucket, "Prefix": config.prefix}
     while True:
-        page = client.list_objects_v2(**kwargs)
-        for obj in page.get("Contents", []):
-            match = _ANCHOR_NAME.fullmatch(obj["Key"][len(config.prefix) :])
-            if match:
-                ranges.append((int(match[1]), int(match[2])))
+        page = client.list_object_versions(**kwargs)
+        items = [(v, False) for v in page.get("Versions", [])]
+        items += [(m, True) for m in page.get("DeleteMarkers", [])]
+        for item, is_marker in items:
+            match = _ANCHOR_NAME.fullmatch(item["Key"][len(config.prefix) :])
+            if not match:
+                continue
+            rec = found.setdefault(
+                (int(match[1]), int(match[2])), {"versions": [], "marker": False}
+            )
+            if is_marker:
+                rec["marker"] = True
+            else:
+                rec["versions"].append(item)
         if not page.get("IsTruncated"):
-            return sorted(ranges)
-        kwargs["ContinuationToken"] = page["NextContinuationToken"]
+            break
+        kwargs["KeyMarker"] = page.get("NextKeyMarker")
+        kwargs["VersionIdMarker"] = page.get("NextVersionIdMarker")
+
+    result: dict[tuple[int, int], dict[str, Any]] = {}
+    for rng, rec in found.items():
+        versions = sorted(rec["versions"], key=lambda v: v["LastModified"])
+        result[rng] = {
+            "version_id": versions[0]["VersionId"] if versions else None,
+            "rewritten": rec["marker"] or len(versions) != 1,
+        }
+    return result
 
 
 def parse_anchor_uri(uri: str) -> tuple[str, str]:
@@ -164,10 +194,15 @@ def anchor_checkpoint(
     *,
     config: AnchorConfig | None = None,
     client: ObjectStore | None = None,
+    commit: bool = True,
 ) -> AnchorResult:
     """Write ``checkpoint``'s anchor payload to the configured bucket.
 
-    Updates ``anchor_status`` and ``anchor_uri`` in place and commits.
+    Updates ``anchor_status`` and ``anchor_uri`` in place. With
+    ``commit=True`` (the default) that is committed along with anything else
+    pending in ``session``. Pass ``commit=False`` to leave committing to
+    the caller; nothing is rolled back then either.
+
     Never raises: any failure (bucket unset, credentials missing, network
     error, Object Lock rejected) is logged and recorded as
     ``anchor_status='failed'`` for a later retry.
@@ -209,15 +244,17 @@ def anchor_checkpoint(
                 ) from exc
         checkpoint.anchor_uri = anchor_uri
         checkpoint.anchor_status = "anchored"
-        session.commit()
+        if commit:
+            session.commit()
         return AnchorResult(ok=True, anchor_uri=anchor_uri)
     except Exception as exc:  # noqa: BLE001 - anchoring is best-effort and retryable
         logger.error("checkpoint %s anchor failed: %s: %s", checkpoint.id, type(exc).__name__, exc)
-        try:
-            checkpoint.anchor_status = "failed"
-            session.commit()
-        except Exception:  # noqa: BLE001
-            session.rollback()
+        checkpoint.anchor_status = "failed"
+        if commit:
+            try:
+                session.commit()
+            except Exception:  # noqa: BLE001
+                session.rollback()
         return AnchorResult(ok=False, error=f"{type(exc).__name__}: {exc}")
 
 
@@ -257,8 +294,12 @@ def verify_anchor(
     *,
     config: AnchorConfig | None = None,
     client: ObjectStore | None = None,
+    version_id: str | None = None,
 ) -> AnchorVerifyResult:
     """Read the anchored copy of ``checkpoint`` and compare it to the row.
+
+    Reads the latest version unless ``version_id`` names one;
+    :func:`verify_anchors` passes the oldest, the original witness.
 
     This is the independent-witness check: the object in the bucket was
     written when the checkpoint was taken and cannot be changed under
@@ -275,7 +316,10 @@ def verify_anchor(
         return AnchorVerifyResult(ok=False, error="LEDGER_ANCHOR_BUCKET not configured")
     try:
         store = client if client is not None else default_client(cfg)
-        response = store.get_object(Bucket=cfg.bucket, Key=anchor_key(cfg, checkpoint))
+        get_kwargs: dict[str, Any] = {"Bucket": cfg.bucket, "Key": anchor_key(cfg, checkpoint)}
+        if version_id not in (None, "null"):  # "null" is an unversioned bucket's id
+            get_kwargs["VersionId"] = version_id
+        response = store.get_object(**get_kwargs)
         raw = response["Body"].read()
         anchored = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 - report, never raise
@@ -305,7 +349,9 @@ def verify_anchors(
 
     - an anchor with no checkpoint row of exactly its range fails: rows
       were deleted, merged, or re-ranged after anchoring;
-    - a row whose anchored copy disagrees with it fails;
+    - a row whose original anchored copy (the oldest version) disagrees
+      with it fails, and so does an anchor key that was overwritten or
+      hidden behind a delete marker;
     - a row with no anchor is reported ``unanchored`` (not yet anchored),
       unless its ``anchor_status`` claims otherwise. The status column can
       only make this check stricter, never excuse a failure.
@@ -317,9 +363,9 @@ def verify_anchors(
         return False, [{"ok": False, "error": "LEDGER_ANCHOR_BUCKET not configured"}]
     try:
         store = client if client is not None else default_client(cfg)
-        anchored = {
-            r
-            for r in anchored_ranges(cfg, store)
+        versions = {
+            r: v
+            for r, v in anchor_versions(cfg, store).items()
             if r[1] >= from_seq and (to_seq is None or r[0] <= to_seq)
         }
     except Exception as exc:  # noqa: BLE001 - report, never raise
@@ -328,12 +374,20 @@ def verify_anchors(
     rows = {(cp.from_seq, cp.to_seq) for cp in checkpoints}
     reports: list[dict[str, Any]] = [
         {"range": list(r), "ok": False, "error": "anchor has no checkpoint row with this range"}
-        for r in sorted(anchored - rows)
+        for r in sorted(set(versions) - rows)
+    ]
+    reports += [
+        {"range": list(r), "ok": False, "error": "anchor was overwritten or deleted after writing"}
+        for r, v in sorted(versions.items())
+        if v["rewritten"]
     ]
     for cp in checkpoints:
         report: dict[str, Any] = {"id": cp.id, "range": [cp.from_seq, cp.to_seq]}
-        if (cp.from_seq, cp.to_seq) in anchored:
-            result = verify_anchor(cp, config=cfg, client=store)
+        witness = versions.get((cp.from_seq, cp.to_seq))
+        if witness is not None and witness["version_id"] is None:
+            report.update(ok=False, error="anchor has only a delete marker")
+        elif witness is not None:
+            result = verify_anchor(cp, config=cfg, client=store, version_id=witness["version_id"])
             report.update(ok=result.ok, matched=result.matched, error=result.error)
         elif cp.anchor_status == "anchored":
             report.update(ok=False, error="row claims anchored but the bucket has no anchor")

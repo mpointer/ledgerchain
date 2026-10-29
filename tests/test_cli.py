@@ -108,3 +108,20 @@ def test_anchor_command_with_no_bucket_skips(url, monkeypatch, capsys):
     assert main(["anchor", "--database-url", url]) == 0
     body = _out(capsys)
     assert body["attempted"] == 1 and body["results"][0]["skipped"] is True
+
+
+def test_checkpoint_with_failed_anchor_exits_nonzero(url, monkeypatch, capsys):
+    from conftest import FakeS3
+
+    _seed(url)
+    monkeypatch.setenv("LEDGER_ANCHOR_BUCKET", "b")
+    monkeypatch.setattr("ledgerchain.anchor.default_client", lambda cfg: FakeS3(fail=True))
+    assert main(["checkpoint", "--database-url", url, "--anchor"]) == 1
+    assert _out(capsys)["anchor"]["ok"] is False
+
+
+def test_checkpoint_with_anchor_requested_but_unconfigured_exits_nonzero(url, monkeypatch, capsys):
+    _seed(url)
+    monkeypatch.delenv("LEDGER_ANCHOR_BUCKET", raising=False)
+    assert main(["checkpoint", "--database-url", url, "--anchor"]) == 1
+    assert _out(capsys)["anchor"]["skipped"] is True

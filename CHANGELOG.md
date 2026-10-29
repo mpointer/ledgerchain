@@ -16,6 +16,24 @@ All notable changes to this project are documented here. The format follows
 - Each row records `hash_version`. The writer stamps 2. Version 1 rows keep
   verifying, and `verify_chain` rejects a version lower than the one before
   it, so a v2 row cannot be quietly rewritten as v1.
+- `verify_anchors` reads the bucket's version listing and checks each row
+  against the oldest version of its anchor, the original witness. It also
+  fails if an anchor key has a second version or a delete marker. Object
+  Lock keeps old versions but does not stop either one, so someone holding
+  the application's S3 credentials could previously shadow an anchor with a
+  forged version, or hide it from the object listing behind a delete marker.
+- `ledger_checkpoint` gets an immutability trigger. Rows cannot be deleted,
+  and only `anchor_status` and `anchor_uri` may change.
+
+### Fixed
+
+- `anchor_checkpoint(..., commit=False)` leaves committing to the caller.
+  The default (`commit=True`) still commits the whole session, as before,
+  and its docstring now says so.
+- `ledgerchain checkpoint --anchor` exits 1 when anchoring fails or is not
+  configured. It used to exit 0.
+- `verify_chain` streams rows instead of loading the whole ledger. Peak
+  memory for 100k entries went from 295 MB to 6 MB; time is unchanged.
 
 ### Upgrading
 
@@ -29,6 +47,12 @@ All notable changes to this project are documented here. The format follows
   layout from the README.
 - `HASH_VERSION` is exported. `DecisionLedgerEntry.to_dict()` includes
   `hash_version`.
+- Re-run `install_immutability` (it is idempotent) to add the
+  `ledger_checkpoint` trigger to an existing database.
+- Anchor verification lists object versions. The S3 client needs
+  `list_object_versions` and `get_object(VersionId=...)` instead of
+  `list_objects_v2`. On AWS, the verifying role needs
+  `s3:ListBucketVersions` and `s3:GetObjectVersion`.
 
 ## [0.2.0] - 2026-10-29
 

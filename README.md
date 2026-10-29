@@ -32,7 +32,8 @@ do is in [docs/why-ledgerchain.md](docs/why-ledgerchain.md).
 | A row is deleted or reordered | strictly contiguous `seq`, each `entry_hash` includes `str(seq)` | `verify_chain` names the seq after the gap |
 | The head pointer is forged | `ledger_head` compared against the last recomputed hash | `verify_chain(head_valid=False)` |
 | A checkpoint row is rewritten | Merkle root recomputed over the entries it covers | `verify_chain` marks `root_valid=False` |
-| The app role updates or deletes | BEFORE UPDATE/DELETE triggers raise | the write fails |
+| The app role updates or deletes | BEFORE UPDATE/DELETE triggers raise (checkpoints: only anchor status may change) | the write fails |
+| An anchor is overwritten or hidden in the bucket | verification lists object versions and reads the oldest | `verify_anchors` fails |
 | A superuser rewrites the whole chain consistently | checkpoint roots anchored under Object Lock | `verify_anchor` compares the live row to the anchored copy |
 
 What it does not do: sign entries (the chain proves integrity and order, not
@@ -140,7 +141,11 @@ Configuration can also come from the environment via `AnchorConfig.from_env()`:
 Lock on buckets without it).
 
 The S3 client is injectable: anything with `put_object(**kw)`,
-`get_object(Bucket=, Key=)` and `list_objects_v2(**kw)`. The test suite uses an in-memory fake and never
+`get_object(Bucket=, Key=, VersionId=)` and `list_object_versions(**kw)`.
+Verification checks each checkpoint against the oldest version of its
+anchor. It fails if an anchor key was overwritten or hidden behind a delete
+marker, which Object Lock does not prevent. On AWS, give the verifying role
+`s3:ListBucketVersions` and `s3:GetObjectVersion`. The test suite uses an in-memory fake and never
 touches the network.
 
 ## CLI

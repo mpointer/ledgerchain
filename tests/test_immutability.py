@@ -4,16 +4,20 @@ and the verifier still catches a rewrite once a superuser removes them."""
 from __future__ import annotations
 
 import pytest
+from conftest import FakeS3
 from sqlalchemy import create_engine, text
 
 from ledgerchain import (
+    AnchorConfig,
     LedgerWriter,
+    anchor_checkpoint,
+    build_checkpoint,
     create_all,
     drop_immutability,
     install_immutability,
     verify_chain,
 )
-from ledgerchain.models import DecisionLedgerEntry
+from ledgerchain.models import DecisionLedgerEntry, LedgerCheckpoint
 
 
 def _append(session, payload):
@@ -65,7 +69,12 @@ def test_install_is_idempotent(tmp_path):
         triggers = {
             r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))
         }
-    assert triggers == {"trg_decision_ledger_no_update", "trg_decision_ledger_no_delete"}
+    assert triggers == {
+        "trg_decision_ledger_no_update",
+        "trg_decision_ledger_no_delete",
+        "trg_ledger_checkpoint_no_delete",
+        "trg_ledger_checkpoint_frozen",
+    }
 
 
 def test_drop_then_verify_still_catches_the_rewrite(immutable_db):
@@ -98,3 +107,27 @@ def test_unsupported_dialect_returns_false():
 
     assert install_immutability(FakeEngine()) is False  # type: ignore[arg-type]
     assert drop_immutability(FakeEngine()) is False  # type: ignore[arg-type]
+
+
+def test_checkpoint_rows_cannot_be_deleted_or_rewritten(immutable_db):
+    _append(immutable_db, {"x": 1})
+    cp = build_checkpoint(immutable_db).checkpoint
+    table = LedgerCheckpoint.__table__
+    for stmt in (
+        table.delete(),
+        table.update().values(merkle_root="f" * 64),
+        table.update().values(prev_checkpoint_root="f" * 64),
+        table.update().values(to_seq=99),
+    ):
+        with pytest.raises(Exception, match="append-only"):
+            immutable_db.execute(stmt)
+            immutable_db.commit()
+        immutable_db.rollback()
+    assert immutable_db.get(LedgerCheckpoint, cp.id).merkle_root == cp.merkle_root
+
+
+def test_anchoring_may_still_update_status_and_uri(immutable_db):
+    _append(immutable_db, {"x": 1})
+    cp = build_checkpoint(immutable_db).checkpoint
+    result = anchor_checkpoint(immutable_db, cp, config=AnchorConfig(bucket="b"), client=FakeS3())
+    assert result.ok and cp.anchor_status == "anchored"
