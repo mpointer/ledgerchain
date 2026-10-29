@@ -1,9 +1,8 @@
 """Attacks on the guarantees themselves, not just on single rows.
 
 Each test is one attacker move against the verifier or the anchor witness.
-``xfail(strict=True)`` marks a gap that is known and not yet closed: it
-documents the attack today and fails loudly once the fix lands, so the
-marker has to be removed.
+A gap that is known but not yet closed goes in as ``xfail(strict=True)``:
+it documents the attack and fails loudly once the fix lands.
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ def s3():
     return FakeS3()
 
 
-@pytest.mark.xfail(strict=True, reason="actor and subject_uri are not in entry_hash yet")
 def test_rewriting_actor_or_subject_is_detected(db):
     seed(db)
     db.execute(

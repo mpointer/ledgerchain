@@ -24,6 +24,7 @@ from .writer import (
     CHECKPOINT_EVENT_TYPE,
     GENESIS_EVENT_TYPE,
     GENESIS_PREV_HASH,
+    HASH_VERSION,
     LedgerWriter,
     compute_entry_hash,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "DecisionLedgerEntry",
     "GENESIS_EVENT_TYPE",
     "GENESIS_PREV_HASH",
+    "HASH_VERSION",
     "LedgerCheckpoint",
     "LedgerHead",
     "LedgerWriter",

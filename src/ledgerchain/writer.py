@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .canonical import sha256_hex
+from .canonical import canonicalize, sha256_hex
 from .models import DecisionLedgerEntry, LedgerHead
 
 GENESIS_PREV_HASH = "0" * 64
@@ -31,6 +31,9 @@ CHECKPOINT_EVENT_TYPE = "checkpoint"
 """Reserved for entries written by :func:`ledgerchain.build_checkpoint`."""
 
 GENESIS_ACTOR: dict[str, Any] = {"kind": "system", "sub": "ledger-writer"}
+
+HASH_VERSION = 2
+"""Entry hash layout the writer stamps on new rows. Version 1 rows still verify."""
 
 
 def rfc3339_utc(ts: datetime) -> str:
@@ -46,16 +49,44 @@ def compute_entry_hash(
     event_type: str,
     ts: datetime,
     tenant_id: str,
+    actor: Mapping[str, Any] | None = None,
+    subject_uri: str | None = None,
+    hash_version: int = 1,
 ) -> str:
-    """``sha256(prev_hash \\n payload_sha256 \\n seq \\n event_type \\n ts \\n tenant_id)``.
+    """The entry hash for ``hash_version``. Timestamps are RFC 3339 in UTC and
+    every digest is a full 64-hex string; nothing is truncated.
 
-    Fields are joined with a newline, timestamps are RFC 3339 in UTC, and
-    every digest is a full 64-hex string. No truncation anywhere.
+    Version 2 (what the writer stamps today) is ``sha256(RFC8785([...]))`` over
+    ``["ledgerchain/v2", prev_hash, payload_sha256, seq, event_type, ts,
+    tenant_id, actor, subject_uri]``. It covers who acted and on what, and a
+    JSON array cannot be re-split the way joined strings can.
+
+    Version 1 is ``sha256(prev_hash \\n payload_sha256 \\n seq \\n event_type
+    \\n ts \\n tenant_id)``. It leaves ``actor`` and ``subject_uri``
+    unprotected and lets a newline inside a field shift content into its
+    neighbour. Only verify old rows with it.
     """
-    material = "\n".join(
-        [prev_hash, payload_sha256, str(seq), event_type, rfc3339_utc(ts), tenant_id]
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    if hash_version == 1:
+        material = "\n".join(
+            [prev_hash, payload_sha256, str(seq), event_type, rfc3339_utc(ts), tenant_id]
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    if hash_version == 2:
+        if actor is None:
+            raise ValueError("hash_version 2 covers the actor; pass actor=")
+        fields = [
+            "ledgerchain/v2",
+            prev_hash,
+            payload_sha256,
+            seq,
+            event_type,
+            rfc3339_utc(ts),
+            tenant_id,
+            dict(actor),
+            subject_uri,
+        ]
+        return hashlib.sha256(canonicalize(fields)).hexdigest()
+    raise ValueError(f"unknown hash_version {hash_version}")
 
 
 class LedgerWriter:
@@ -162,9 +193,6 @@ def _build_entry(
     payload_dict = dict(payload)
     actor_dict = dict(actor)
     payload_sha256 = sha256_hex(payload_dict)
-    # Canonicalize the actor too so a non-serializable actor fails before
-    # the row is added, not at flush time inside the JSON type.
-    sha256_hex(actor_dict)
     entry_hash = compute_entry_hash(
         prev_hash=prev_hash,
         payload_sha256=payload_sha256,
@@ -172,9 +200,13 @@ def _build_entry(
         event_type=event_type,
         ts=when,
         tenant_id=tenant_id,
+        actor=actor_dict,
+        subject_uri=subject_uri,
+        hash_version=HASH_VERSION,
     )
     return DecisionLedgerEntry(
         seq=seq,
+        hash_version=HASH_VERSION,
         tenant_id=tenant_id,
         ts=when,
         event_type=event_type,

@@ -35,8 +35,10 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine.interfaces import Dialect
@@ -89,6 +91,10 @@ class DecisionLedgerEntry(Base):
     __tablename__ = "decision_ledger"
 
     seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    # server_default 1: rows written before the column existed are version 1.
+    hash_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=1, server_default=text("1")
+    )
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False)
     ts: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -108,6 +114,7 @@ class DecisionLedgerEntry(Base):
         """Plain-JSON view of the row. Hashes are full 64-hex digests."""
         return {
             "seq": self.seq,
+            "hash_version": self.hash_version,
             "tenant_id": self.tenant_id,
             "ts": self.ts.isoformat(),
             "event_type": self.event_type,
