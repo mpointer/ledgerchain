@@ -39,6 +39,9 @@ dev = [
   "pytest>=8",
   "mypy>=1.10",
   "ruff>=0.5",
+  # tests/test_s3_moto.py drives the real boto3 client against moto's S3.
+  "boto3>=1.35.2",
+  "moto[s3]>=5.2",
 ]
 
 [project.scripts]
