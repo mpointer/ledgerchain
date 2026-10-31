@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `verify_anchors` could check a row against the wrong version of its
+  anchor. It picked the "oldest" by `LastModified`, and versions written in
+  the same second tie, so the tie could fall to an overwriting (forged)
+  version. The verdict was still correct, because a key with more than one
+  version always fails, but the row was reported as matching the forgery.
+  Ties are now broken by S3's newest-first listing order.
+
+### Changed
+
+- The test suite drives the real boto3 client against moto's S3: Object
+  Lock, the 412 from conditional puts, version listing past 1,000 entries,
+  delete markers, and `verify --check-anchors` end to end. `boto3` and
+  `moto[s3]` are dev dependencies, so CI and the release workflow run these
+  tests. `FakeS3` now lists versions newest-first with tied timestamps, as
+  S3 does.
+
 ## [0.3.0] - 2026-10-29
 
 Security release with a schema change. The actor and subject of every new entry are

@@ -141,9 +141,10 @@ class FakeS3:
         for (bucket, key), versions in sorted(self.history.items()):
             if bucket != kwargs["Bucket"] or not key.startswith(kwargs["Prefix"]):
                 continue
-            for order, (version_id, body) in enumerate(versions):
+            # Like S3: newest first, and timestamps that tie (same second).
+            for version_id, body in reversed(versions):
                 kind = "Versions" if body is not None else "DeleteMarkers"
-                listing[kind].append({"Key": key, "VersionId": version_id, "LastModified": order})
+                listing[kind].append({"Key": key, "VersionId": version_id, "LastModified": 0})
         return {**listing, "IsTruncated": False}
 
     def stored_json(self, bucket: str, key: str) -> dict:

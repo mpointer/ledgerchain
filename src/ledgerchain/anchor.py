@@ -139,6 +139,7 @@ def anchor_versions(
     """
     found: dict[tuple[int, int], dict[str, Any]] = {}
     kwargs: dict[str, Any] = {"Bucket": config.bucket, "Prefix": config.prefix}
+    position = 0  # S3 lists each key's versions newest first, across pages
     while True:
         page = client.list_object_versions(**kwargs)
         items = [(v, False) for v in page.get("Versions", [])]
@@ -153,7 +154,8 @@ def anchor_versions(
             if is_marker:
                 rec["marker"] = True
             else:
-                rec["versions"].append(item)
+                rec["versions"].append((item["LastModified"], -position, item["VersionId"]))
+            position += 1
         if not page.get("IsTruncated"):
             break
         kwargs["KeyMarker"] = page.get("NextKeyMarker")
@@ -161,9 +163,11 @@ def anchor_versions(
 
     result: dict[tuple[int, int], dict[str, Any]] = {}
     for rng, rec in found.items():
-        versions = sorted(rec["versions"], key=lambda v: v["LastModified"])
+        # LastModified ties within the same second, so listing order breaks
+        # the tie: the version listed last is the oldest.
+        versions = sorted(rec["versions"])
         result[rng] = {
-            "version_id": versions[0]["VersionId"] if versions else None,
+            "version_id": versions[0][2] if versions else None,
             "rewritten": rec["marker"] or len(versions) != 1,
         }
     return result
